@@ -67,7 +67,7 @@ class InferencePipeline:
             # 2. Extract Audio
             print("Extracting audio...")
             video = VideoFileClip(video_path)
-            video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+            video.audio.write_audiofile(audio_path, logger=None)
             video.close()
 
             # 3. Clean Audio
