@@ -1,22 +1,23 @@
 import os
 import shutil
 import tempfile
-from fastapi import FastAPI, UploadFile, File, Depends, Request
+import requests
+from fastapi import FastAPI, Depends, Request, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import uvicorn
 
-from inference_pipeline import InferencePipeline
 from database import engine, get_db, Base
 from models import VideoRecord
+
+# Environment variables for service communication
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080")
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
 
-from inference_pipeline import InferencePipeline
-
-app = FastAPI(title="Hate Speech Detection API")
+app = FastAPI(title="AudioGuard Orchestrator API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,36 +27,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pipeline_engine = None
-
-@app.on_event("startup")
-def startup_event():
-    global pipeline_engine
-    print("Starting up API, loading models...")
-    pipeline_engine = InferencePipeline()
+@app.get("/")
+def health_check():
+    return {"status": "healthy", "service": "audioguard-backend"}
 
 @app.post("/api/analyze")
-async def analyze_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    print(f"Received file: {file.filename}")
+async def analyze_video(
+    video_url: str = Form(...), 
+    db: Session = Depends(get_db)
+):
+    """
+    Receives a Cloudinary URL, delegates to ML Service, and stores results.
+    """
+    print(f"Received analyzed request for URL: {video_url}")
     
-    # Save the uploaded file to a temporary location
-    temp_dir = tempfile.gettempdir()
-    safe_filename = file.filename.replace(" ", "_")
-    temp_file_path = os.path.join(temp_dir, safe_filename)
-    
-    contents = await file.read()
-    with open(temp_file_path, "wb") as buffer:
-        buffer.write(contents)
-        
-    print(f"Saved {len(contents)} bytes to {temp_file_path}")
-        
     try:
-        # Run inference pipeline
-        result = pipeline_engine.process_file(temp_file_path)
+        # 1. Delegate to ML Service (Google Cloud Run)
+        print(f"Forwarding to ML service: {ML_SERVICE_URL}/process")
+        resp = requests.post(f"{ML_SERVICE_URL}/process", json={"video_url": video_url})
         
-        # Save to Database
+        if resp.status_code != 200:
+            return JSONResponse(
+                status_code=resp.status_code, 
+                content={"error": f"ML Service failure: {resp.text}"}
+            )
+            
+        result = resp.json()
+        
+        # 2. Save to Database
         db_record = VideoRecord(
-            filename=safe_filename,
+            filename=video_url.split("/")[-1],
             transcription=result["transcription"],
             detected_emotion=result["detected_emotion"],
             is_hatespeech=result["is_hatespeech"],
@@ -67,14 +68,15 @@ async def analyze_file(file: UploadFile = File(...), db: Session = Depends(get_d
         db.commit()
         db.refresh(db_record)
         
-        result["db_id"] = db_record.id
-        
-    finally:
-        # Clean up
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        # Return merged result
+        return JSONResponse(content={
+            "db_id": db_record.id,
+            **result
+        })
             
-    return JSONResponse(content=result)
+    except Exception as e:
+        print(f"Orchestrator Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/videos")
 def get_videos(db: Session = Depends(get_db)):

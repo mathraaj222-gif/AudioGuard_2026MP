@@ -63,20 +63,45 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    // Environment Config: Replace this with your Railway deployment URL
-    const API_BASE_URL = window.location.hostname === "localhost" 
-                         ? "http://localhost:8000" 
-                         : "https://your-app-name-production.up.railway.app";
+    // Environment Config
+    const API_BASE_URL = window.location.hostname === "localhost"
+        ? "http://localhost:8000"
+        : "https://your-app-name-production.up.railway.app";
+
+    // Cloudinary Config (Unsigned Upload)
+    const CLOUDINARY_URL = "https://api.cloudinary.com/v1_1/dug4wbgmo/video/upload";
+    const CLOUDINARY_PRESET = "ml_default";
 
     async function uploadFileToAPI(file) {
-        const formData = new FormData();
-        formData.append('file', file);
-
         try {
+            // 1. Upload to Cloudinary
+            statusText.innerText = "Uploading to Secure Cloud Storage...";
+            const cloudFormData = new FormData();
+            cloudFormData.append('file', file);
+            cloudFormData.append('upload_preset', CLOUDINARY_PRESET);
+
+            const cloudResponse = await fetch(CLOUDINARY_URL, {
+                method: 'POST',
+                body: cloudFormData
+            });
+
+            if (!cloudResponse.ok) {
+                const errData = await cloudResponse.json();
+                throw new Error(`Cloudinary Upload Failed: ${errData.error.message}`);
+            }
+
+            const cloudData = await cloudResponse.json();
+            const videoUrl = cloudData.secure_url;
+            console.log("Cloudinary URL:", videoUrl);
+
+            // 2. Send URL to Railway Backend for Analysis
             statusText.innerText = "Running Deep Learning Models (TCA & SER)...";
+            const backendFormData = new FormData();
+            backendFormData.append('video_url', videoUrl);
+
             const response = await fetch(`${API_BASE_URL}/api/analyze`, {
                 method: 'POST',
-                body: formData
+                body: backendFormData
             });
 
             if (!response.ok) {
@@ -84,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const data = await response.json();
-            
+
             // Artificial delay to mimic heavy processing for "wow" factor if it responds too fast locally
             setTimeout(() => {
                 showResults(data);

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+requests
+numpy<2.0.0
+moviepy==2.2.1
+openai-whisper
+librosa==0.10.1
+noisereduce==3.0.2
+transformers==4.38.2
+torch==2.2.1
+soundfile==0.12.1
+setuptools==69.5.1
+wheel

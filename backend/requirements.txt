@@ -1,15 +1,6 @@
-setuptools==69.5.1
-wheel
-numpy<2.0.0
 fastapi==0.110.0
 uvicorn==0.28.0
 python-multipart==0.0.9
-moviepy==2.2.1
-openai-whisper
-librosa==0.10.1
-noisereduce==3.0.2
-transformers==4.38.2
-torch==2.2.1
-soundfile==0.12.1
+requests
 SQLAlchemy==2.0.28
 psycopg2-binary==2.9.9
