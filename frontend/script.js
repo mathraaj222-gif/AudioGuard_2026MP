@@ -66,7 +66,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Environment Config
     const API_BASE_URL = window.location.hostname === "localhost"
         ? "http://localhost:8000"
-        : "https://your-app-name-production.up.railway.app";
+        : "https://audioguard2026mp-production.up.railway.app";
 
     // Cloudinary Config (Unsigned Upload)
     const CLOUDINARY_URL = "https://api.cloudinary.com/v1_1/dug4wbgmo/video/upload";
