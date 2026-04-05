@@ -14,6 +14,7 @@ from models import VideoRecord
 
 # Environment variables for service communication - STRIP TRAILING SLASH
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Initialize DB tables (Safe Startup)
 try:
@@ -49,7 +50,11 @@ async def analyze_video(
         # 1. Delegate to ML Service (Google Cloud Run)
         print(f"Forwarding to ML service: {ML_SERVICE_URL}/process")
         try:
-            resp = requests.post(f"{ML_SERVICE_URL}/process", json={"video_url": video_url}, timeout=120)
+            payload = {
+                "video_url": video_url,
+                "hf_token": HF_TOKEN
+            }
+            resp = requests.post(f"{ML_SERVICE_URL}/process", json=payload, timeout=120)
             
             if resp.status_code != 200:
                 print(f"ML Service Error ({resp.status_code}): {resp.text}")

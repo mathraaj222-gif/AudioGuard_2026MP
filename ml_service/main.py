@@ -24,6 +24,9 @@ class InferencePipeline:
     def __init__(self):
         print("Initializing ML Service Models...")
         
+        # 0. Get HF Token from Env (For private models)
+        self.hf_token = os.getenv("HF_TOKEN")
+        
         # 1. Whisper (Transcription)
         print("Loading Whisper 'base' model...")
         self.whisper_model = whisper.load_model("base")
@@ -32,7 +35,12 @@ class InferencePipeline:
         print("Loading SER Model (wav2vec2-large)...")
         ser_model_id = "MathRaaj/S4_wav2vec2_large"
         try:
-            self.ser_model = pipeline("audio-classification", model=ser_model_id)
+            self.ser_model = pipeline(
+                "audio-classification", 
+                model=ser_model_id, 
+                token=self.hf_token,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
             print(f"SER Model Loaded: {ser_model_id}")
         except Exception as e:
             print(f"Warning: Failed to load SER model from {ser_model_id} ({e}). Using mock data.")
@@ -42,7 +50,13 @@ class InferencePipeline:
         print("Loading TCA Model (deberta-large-nli)...")
         tca_model_id = "MathRaaj/T3_deberta_large_nli"
         try:
-            self.tca_model = pipeline("text-classification", model=tca_model_id, top_k=None)
+            self.tca_model = pipeline(
+                "text-classification", 
+                model=tca_model_id, 
+                top_k=None, 
+                token=self.hf_token,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
             print(f"TCA Model Loaded: {tca_model_id}")
         except Exception as e:
             print(f"Warning: Failed to load TCA model from {tca_model_id} ({e}). Using mock data.")
@@ -123,17 +137,24 @@ class InferencePipeline:
                 "detected_emotion": "Aggressive/Angry" if np.argmax(ser_probs) == 1 else "Neutral"
             }
 
+import traceback
+
 # --- FastAPI App ---
 app = FastAPI(title="AudioGuard ML Service")
 pipeline = None
 
 class VideoRequest(BaseModel):
     video_url: str
+    hf_token: str = None
 
 @app.on_event("startup")
 async def startup_event():
     global pipeline
-    pipeline = InferencePipeline()
+    try:
+        pipeline = InferencePipeline()
+    except Exception as e:
+        print(f"CRITICAL: Failed to initialize pipeline: {e}")
+        traceback.print_exc()
 
 @app.get("/")
 def health_check():
@@ -142,7 +163,17 @@ def health_check():
 @app.post("/process")
 async def process_video(request: VideoRequest):
     try:
+        if pipeline is None:
+            raise Exception("ML Pipeline not initialized properly on startup.")
+        
+        # Override the pipeline's token if one is provided in the request
+        if request.hf_token:
+            pipeline.hf_token = request.hf_token
+            
         result = pipeline.process_url(request.video_url)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"ML Service Error: {e}")
+        traceback.print_exc() # This prints to Google Cloud Logs
+        # Return the actual error message to the Orchestrator
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
