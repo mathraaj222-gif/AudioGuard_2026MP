@@ -45,15 +45,24 @@ async def analyze_video(
     try:
         # 1. Delegate to ML Service (Google Cloud Run)
         print(f"Forwarding to ML service: {ML_SERVICE_URL}/process")
-        resp = requests.post(f"{ML_SERVICE_URL}/process", json={"video_url": video_url})
-        
-        if resp.status_code != 200:
-            return JSONResponse(
-                status_code=resp.status_code, 
-                content={"error": f"ML Service failure: {resp.text}"}
-            )
+        try:
+            resp = requests.post(f"{ML_SERVICE_URL}/process", json={"video_url": video_url}, timeout=120)
             
-        result = resp.json()
+            if resp.status_code != 200:
+                print(f"ML Service Error ({resp.status_code}): {resp.text}")
+                return JSONResponse(
+                    status_code=resp.status_code, 
+                    content={"error": f"ML Service failure ({resp.status_code}): {resp.text}"}
+                )
+            
+            result = resp.json()
+        except requests.exceptions.Timeout:
+            print("Orchestrator Error: ML Service Timed Out")
+            return JSONResponse(status_code=504, content={"error": "The AI Brain is taking too long to load (Time Out). Please try again in 30 seconds."})
+        except Exception as forward_err:
+            print(f"Orchestrator Error during forwarding: {forward_err}")
+            traceback.print_exc()
+            return JSONResponse(status_code=500, content={"error": f"Failed to connect to ML Brain: {str(forward_err)}"})
         
         # 2. Save to Database (With Safety Net)
         try:
