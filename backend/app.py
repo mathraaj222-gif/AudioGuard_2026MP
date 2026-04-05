@@ -1,5 +1,6 @@
 import os
 import shutil
+import traceback
 import tempfile
 import requests
 from fastapi import FastAPI, Depends, Request, Form
@@ -21,7 +22,7 @@ app = FastAPI(title="AudioGuard Orchestrator API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "https://audio-guard-2026-mp.vercel.app"],
+    allow_origins=["https://audio-guard-2026-mp.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,28 +55,32 @@ async def analyze_video(
             
         result = resp.json()
         
-        # 2. Save to Database
-        db_record = VideoRecord(
-            filename=video_url.split("/")[-1],
-            transcription=result["transcription"],
-            detected_emotion=result["detected_emotion"],
-            is_hatespeech=result["is_hatespeech"],
-            confidence=result["confidence"],
-            tca_confidence=result["tca_confidence"],
-            ser_confidence=result["ser_confidence"]
-        )
-        db.add(db_record)
-        db.commit()
-        db.refresh(db_record)
+        # 2. Save to Database (With Safety Net)
+        try:
+            db_record = VideoRecord(
+                filename=video_url.split("/")[-1],
+                transcription=result["transcription"],
+                detected_emotion=result["detected_emotion"],
+                is_hatespeech=result["is_hatespeech"],
+                confidence=result["confidence"],
+                tca_confidence=result["tca_confidence"],
+                ser_confidence=result["ser_confidence"]
+            )
+            db.add(db_record)
+            db.commit()
+            db.refresh(db_record)
+            result["db_id"] = db_record.id
+        except Exception as db_error:
+            print(f"Database Warning (Analysis finished but not saved): {db_error}")
+            traceback.print_exc()
+            result["db_id"] = None # Indicate it wasn't saved but valid
         
         # Return merged result
-        return JSONResponse(content={
-            "db_id": db_record.id,
-            **result
-        })
+        return JSONResponse(content=result)
             
     except Exception as e:
         print(f"Orchestrator Error: {e}")
+        traceback.print_exc() # Print the full error in Railway logs
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/videos")
