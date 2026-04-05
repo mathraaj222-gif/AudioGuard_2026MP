@@ -11,8 +11,8 @@ import uvicorn
 from database import engine, get_db, Base
 from models import VideoRecord
 
-# Environment variables for service communication
-ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080")
+# Environment variables for service communication - STRIP TRAILING SLASH
+ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
 
 # Initialize DB tables
 Base.metadata.create_all(bind=engine)
@@ -21,7 +21,7 @@ app = FastAPI(title="AudioGuard Orchestrator API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "https://audio-guard-2026-mp.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
