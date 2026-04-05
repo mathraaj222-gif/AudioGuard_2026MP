@@ -15,8 +15,11 @@ from models import VideoRecord
 # Environment variables for service communication - STRIP TRAILING SLASH
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
 
-# Initialize DB tables
-Base.metadata.create_all(bind=engine)
+# Initialize DB tables (Safe Startup)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Database Initialization Warning: {e}. The app will continue, but first few saves might fail.")
 
 app = FastAPI(title="AudioGuard Orchestrator API")
 
