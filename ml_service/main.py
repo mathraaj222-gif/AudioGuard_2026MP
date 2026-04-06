@@ -9,7 +9,8 @@ import gc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy import VideoFileClip
-from transformers import pipeline, AutoModelForAudioClassification, AutoModelForSequenceClassification, AutoTokenizer
+from transformers import pipeline
+from faster_whisper import WhisperModel
 
 # --- Fusion Logic ---
 def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
@@ -22,9 +23,9 @@ def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
-        print("Initializing ML Service (Lazy Loading Mode)...")
+        print("Initializing ML Service (Lazy + INT8 Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cpu" # Optimized for CPU in Cloud Run
         self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     def clear_memory(self):
@@ -54,33 +55,40 @@ class InferencePipeline:
             data, rate = librosa.load(audio_path, sr=16000)
             clean_audio = nr.reduce_noise(y=data, sr=rate, stationary=True)
             
-            # 3. Transcription (Whisper Large-v3-Turbo)
-            print("Step 1: Transcribing (Whisper Large-v3-Turbo)...")
-            trans_pipe = pipeline(
-                "automatic-speech-recognition", 
-                model="openai/whisper-large-v3-turbo", 
-                chunk_length_s=30,
-                device=self.device,
-                torch_dtype=self.dtype
-            )
-            asr_result = trans_pipe(clean_audio, return_timestamps=False)
-            original_text = asr_result["text"]
-            del trans_pipe
-            self.clear_memory()
+            # 3. Transcription (Faster-Whisper INT8 Optimization)
+            print("Step 1: Transcribing (Faster-Whisper small int8)...")
+            # Using your exact "Critical Optimization" parameters
+            try:
+                whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+                segments, info = whisper_model.transcribe(clean_audio, beam_size=5)
+                
+                detected_lang = info.language
+                original_text = "".join([s.text for s in segments]).strip()
+                print(f"Detected language: {detected_lang}")
+                
+                del whisper_model
+                self.clear_memory()
+            except Exception as e:
+                print(f"Whisper Optimization Error: {e}")
+                raise e
 
-            # 4. Translation (NLLB-200)
+            # 4. Translation (NLLB-200) - Enhanced world-class translation
             print("Step 2: Translating (NLLB-200)...")
-            translator = pipeline(
-                "translation", 
-                model="facebook/nllb-200-distilled-600M",
-                device=self.device,
-                torch_dtype=self.dtype,
-                tgt_lang="eng_Latn"
-            )
-            translation_result = translator(original_text, max_length=512)
-            english_text = translation_result[0]['translation_text']
-            del translator
-            self.clear_memory()
+            try:
+                translator = pipeline(
+                    "translation", 
+                    model="facebook/nllb-200-distilled-600M",
+                    device=-1, # CPU
+                    torch_dtype=self.dtype,
+                    tgt_lang="eng_Latn"
+                )
+                translation_result = translator(original_text, max_length=512)
+                english_text = translation_result[0]['translation_text']
+                del translator
+                self.clear_memory()
+            except Exception as e:
+                print(f"NLLB Translation Error: {e}")
+                english_text = original_text # Fallback
 
             # 5. Emotion Recognition (Wav2Vec-BERT)
             print("Step 3: Analyzing Emotion...")
@@ -88,13 +96,13 @@ class InferencePipeline:
                 "audio-classification", 
                 model="MathRaaj/s3-wav2vec-bert", 
                 token=self.hf_token,
-                device=self.device,
+                device=-1, # CPU
                 torch_dtype=self.dtype
             )
             ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
             top_ser = ser_preds[0]
             detected_emotion = top_ser['label']
-            ser_probs = np.zeros(2) # Fallback binary for fusion
+            ser_probs = np.zeros(2) 
             if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust']):
                 ser_probs[1] = top_ser['score']
             else:
@@ -108,7 +116,7 @@ class InferencePipeline:
                 "text-classification", 
                 model="MathRaaj/t1-bert-nli-baseline", 
                 token=self.hf_token,
-                device=self.device,
+                device=-1, # CPU
                 torch_dtype=self.dtype
             )
             tca_preds = tca_pipe(english_text)[0]
@@ -131,7 +139,7 @@ class InferencePipeline:
                 "tca_confidence": f"{float(tca_probs[1] if final_class == 1 else tca_probs[0]) * 100:.2f}%",
                 "ser_confidence": f"{float(ser_probs[1] if final_class == 1 else ser_probs[0]) * 100:.2f}%",
                 "detected_emotion": detected_emotion,
-                "original_language": "Detected via NLLB"
+                "original_language": detected_lang
             }
 
 import traceback
@@ -140,14 +148,14 @@ import traceback
 app = FastAPI()
 pipeline_instance = None
 
-class VideoRequest(BaseModel):
-    video_url: str
-    hf_token: str = None
-
 @app.on_event("startup")
 async def startup():
     global pipeline_instance
     pipeline_instance = InferencePipeline()
+
+class VideoRequest(BaseModel):
+    video_url: str
+    hf_token: str = None
 
 @app.get("/")
 def health(): return {"status": "ok"}
