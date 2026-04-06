@@ -135,7 +135,9 @@ def get_status(video_url: str, db: Session = Depends(get_db)):
         "results": None
     }
 
-    if record.status == "COMPLETED":
+    # If it is COMPLETED or FAILED, we should still send the record details 
+    # (specifically the error message if it failed)
+    if record.status in ["COMPLETED", "FAILED"]:
         response["results"] = {
             "transcription": record.transcription,
             "translation_en": record.translation_en,
