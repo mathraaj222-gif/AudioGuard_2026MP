@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from moviepy import VideoFileClip
 from transformers import pipeline
 from faster_whisper import WhisperModel
-from huggingface_hub import login
+from huggingface_hub import login, snapshot_download
 
 # --- Fusion Logic ---
 def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
@@ -27,7 +27,7 @@ class InferencePipeline:
         print("Initializing ML Service (Lazy + INT8 + AUTH Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
         
-        # LOG IN TO HF HUB TO BYPASS RATE LIMITS
+        # LOG IN TO HF HUB AT STARTUP
         if self.hf_token:
             try:
                 login(token=self.hf_token)
@@ -37,7 +37,7 @@ class InferencePipeline:
             except Exception as e:
                 print(f"Warning: HF Login Failed: {e}")
                 
-        self.device = "cpu" # Optimized for CPU in Cloud Run
+        self.device = "cpu" 
         self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     def clear_memory(self):
@@ -52,14 +52,14 @@ class InferencePipeline:
             audio_path = os.path.join(tmp_dir, "input.wav")
             
             # 1. Download
-            print(f"Downloading {video_url}...")
+            print(f"Downloading video from {video_url}...")
             resp = requests.get(video_url, stream=True)
             with open(video_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
 
             # 2. Extract & Preprocess
-            print("Processing audio...")
+            print("Processing audio extraction...")
             video = VideoFileClip(video_path)
             video.audio.write_audiofile(audio_path, logger=None)
             video.close()
@@ -67,11 +67,17 @@ class InferencePipeline:
             data, rate = librosa.load(audio_path, sr=16000)
             clean_audio = nr.reduce_noise(y=data, sr=rate, stationary=True)
             
-            # 3. Transcription (Faster-Whisper INT8 Optimization)
-            print("Step 1: Transcribing (Faster-Whisper small int8)...")
-            # Using your exact "Critical Optimization" parameters
+            # 3. Transcription (Manual Snapshot Download for Stability)
+            print("Step 1: Fetching & Transcribing (Small INT8)...")
             try:
-                whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+                # MANUALLY DOWNLOAD THE MODEL TO ENSURE A CLEAN SLATE
+                model_path = snapshot_download(
+                    repo_id="Systran/faster-whisper-small", 
+                    token=self.hf_token,
+                    local_files_only=False
+                )
+                
+                whisper_model = WhisperModel(model_path, device="cpu", compute_type="int8")
                 segments, info = whisper_model.transcribe(clean_audio, beam_size=5)
                 
                 detected_lang = info.language
@@ -81,7 +87,7 @@ class InferencePipeline:
                 del whisper_model
                 self.clear_memory()
             except Exception as e:
-                print(f"Whisper Optimization Error: {e}")
+                print(f"Whisper Fetch/Optimization Error: {e}")
                 raise e
 
             # 4. Translation (NLLB-200) - Enhanced world-class translation
