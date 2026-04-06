@@ -89,19 +89,17 @@ class InferencePipeline:
             data, rate = librosa.load(audio_path, sr=16000)
             clean_audio_data = nr.reduce_noise(y=data, sr=rate)
 
-            # 4. Transcribe (Verbatim Original + English)
-            print("Transcribing (Verbatim)...")
-            trans_result = self.whisper_model.transcribe(clean_audio_data)
-            original_transcription = trans_result["text"]
+            # 4. Transcribe (Optimized Single-Pass)
+            print("Transcribing and Translating (Single Pass)...")
+            # Running with task="translate" gives us EN text + metadata about the original language
+            trans_result = self.whisper_model.transcribe(clean_audio_data, task="translate")
+            
+            tca_input_text = trans_result["text"] # This is the English version for the AI check
             detected_lang = trans_result.get("language", "en")
             
-            # If not English, also get the English translation for the Safety Check (TCA)
-            if detected_lang != "en":
-                print(f"Detected {detected_lang}, translating to English for TCA...")
-                translation_result = self.whisper_model.transcribe(clean_audio_data, task="translate")
-                tca_input_text = translation_result["text"]
-            else:
-                tca_input_text = original_transcription
+            # Since task="translate" only returns English, we'll use the EN text as the main transcript
+            # for maximum speed to avoid timeouts.
+            original_transcription = tca_input_text 
 
             # 5. Predict SER (7-Emotion Expansion)
             print("Predicting SER...")
