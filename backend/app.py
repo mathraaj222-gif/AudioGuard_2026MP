@@ -57,20 +57,26 @@ def perform_analysis_task(video_url: str, record_id: int):
         record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
         if not record: return
 
-        if resp.status_code != 200:
-            print(f"Bkg Task: ML Service Error: {resp.text}")
-            record.status = "FAILED"
-        else:
+        if resp.status_code == 200:
             data = resp.json()
-            record.transcription = data.get("transcription")
-            record.translation_en = data.get("translation_en")
-            record.original_language = data.get("original_language")
-            record.detected_emotion = data.get("detected_emotion")
-            record.is_hatespeech = data.get("is_hatespeech")
-            record.confidence = data.get("confidence")
-            record.tca_confidence = data.get("tca_confidence")
-            record.ser_confidence = data.get("ser_confidence")
-            record.status = "COMPLETED"
+            if data.get("status") == "failed":
+                record.status = "FAILED"
+                record.transcription = data.get("error_detail", "Unknown AI Error")
+                print(f"Bkg Task: AI Brain Failure: {record.transcription}")
+            else:
+                record.transcription = data.get("transcription")
+                record.translation_en = data.get("translation_en")
+                record.original_language = data.get("original_language")
+                record.detected_emotion = data.get("detected_emotion")
+                record.is_hatespeech = data.get("is_hatespeech")
+                record.confidence = data.get("confidence")
+                record.tca_confidence = data.get("tca_confidence")
+                record.ser_confidence = data.get("ser_confidence")
+                record.status = "COMPLETED"
+        else:
+            print(f"Bkg Task: ML Service Network Error: {resp.status_code} {resp.text}")
+            record.status = "FAILED"
+            record.transcription = f"Network Error ({resp.status_code})"
         
         db.commit()
     except Exception as e:

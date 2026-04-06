@@ -134,7 +134,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     showResults(data.results);
                 } else if (data.status === 'FAILED') {
                     clearInterval(timer);
-                    alert("The AI Analysis failed for this specific video. Try another file.");
+                    const errorMsg = data.results?.transcription || "An unknown AI error occurred.";
+                    alert(`The AI Analysis failed: ${errorMsg}\n\nPlease try another file or verify your Hugging Face Token / Environment Variables.`);
                     processingState.classList.add('hidden');
                     uploadZone.classList.remove('hidden');
                 }

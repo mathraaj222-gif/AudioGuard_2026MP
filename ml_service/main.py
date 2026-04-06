@@ -167,5 +167,14 @@ async def process(request: VideoRequest):
             pipeline_instance.hf_token = request.hf_token
         return pipeline_instance.process_url(request.video_url)
     except Exception as e:
+        # RETURN THE ACTUAL ERROR MESSAGE SO THE UI CAN SHOW IT
+        error_name = type(e).__name__
+        error_msg = str(e)
+        print(f"ML Service Failure ({error_name}): {error_msg}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        # We return a successful HTTP 200 but including a failure status in the JSON 
+        # so the orchestrator can read it peacefully without crashing.
+        return {
+            "status": "failed",
+            "error_detail": f"AI Brain Error ({error_name}): {error_msg}"
+        }
