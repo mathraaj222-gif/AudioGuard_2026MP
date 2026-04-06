@@ -17,11 +17,23 @@ from models import VideoRecord
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Initialize DB tables
+from sqlalchemy import text
+
+# Initialize DB tables with Auto-Migration for the Async Upgrade
 try:
-    Base.metadata.create_all(bind=engine)
-except Exception as e:
-    print(f"Database Initialization Warning: {e}")
+    # Check if the 'status' column exists (to detect outdated DB on Railway)
+    with engine.connect() as conn:
+        conn.execute(text("SELECT status FROM video_records LIMIT 1"))
+    print("Database schema is up-to-date.")
+except Exception:
+    print("Outdated/Empty Database detected. Initializing schema for Async Upgrade...")
+    try:
+        # If it fails, we drop and recreate to ensure the new columns (status, video_url) are added
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        print("Database schema successfully recreated.")
+    except Exception as e:
+        print(f"Database Reset Warning (Expected on first run): {e}")
 
 app = FastAPI(title="AudioGuard Orchestrator API")
 
