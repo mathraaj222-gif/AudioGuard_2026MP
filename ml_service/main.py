@@ -54,26 +54,22 @@ class InferencePipeline:
             data, rate = librosa.load(audio_path, sr=16000)
             clean_audio = nr.reduce_noise(y=data, sr=rate, stationary=True)
             
-            # 3. Transcription (Voxtral Mini V2)
-            print("Step 1: Transcribing (Voxtral Mini V2)...")
+            # 3. Transcription (Whisper Large-v3-Turbo)
+            print("Step 1: Transcribing (Whisper Large-v3-Turbo)...")
             trans_pipe = pipeline(
                 "automatic-speech-recognition", 
-                model="Voxtral/Voxtral-Mini-Transcribe-v2", 
+                model="openai/whisper-large-v3-turbo", 
+                chunk_length_s=30,
                 device=self.device,
                 torch_dtype=self.dtype
             )
             asr_result = trans_pipe(clean_audio, return_timestamps=False)
             original_text = asr_result["text"]
-            
-            # Note: Voxtral/Whisper provides language chunks, but we'll use a simple length check 
-            # for the orchestrator until we implement deep language ID.
-            detected_lang = "auto" 
             del trans_pipe
             self.clear_memory()
 
             # 4. Translation (NLLB-200)
             print("Step 2: Translating (NLLB-200)...")
-            # We use NLLB to ensure the safety check (TCA) gets high-quality English
             translator = pipeline(
                 "translation", 
                 model="facebook/nllb-200-distilled-600M",
@@ -81,7 +77,6 @@ class InferencePipeline:
                 torch_dtype=self.dtype,
                 tgt_lang="eng_Latn"
             )
-            # NLLB handles the source language automatically
             translation_result = translator(original_text, max_length=512)
             english_text = translation_result[0]['translation_text']
             del translator
