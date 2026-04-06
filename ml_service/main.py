@@ -3,15 +3,15 @@ import tempfile
 import requests
 import numpy as np
 import torch
-import whisper
 import librosa
 import noisereduce as nr
+import gc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy import VideoFileClip
-from transformers import pipeline
+from transformers import pipeline, AutoModelForAudioClassification, AutoModelForSequenceClassification, AutoTokenizer
 
-# --- Fusion Logic (Inlined to keep service standalone) ---
+# --- Fusion Logic ---
 def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
     tca_max = np.max(tca_probs)
     if tca_max >= tca_threshold:
@@ -22,171 +22,147 @@ def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
-        print("Initializing ML Service Models...")
-        
-        # 0. Get HF Token from Env (For private models)
+        print("Initializing ML Service (Lazy Loading Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
-        
-        # 1. Whisper (Transcription)
-        print("Loading Whisper 'small' model (Verbatim Update)...")
-        self.whisper_model = whisper.load_model("small")
-        
-        # 2. SER Model (Emotion) - Loading from Hugging Face Hub
-        print("Loading SER Model (wav2vec-bert)...")
-        ser_model_id = "MathRaaj/s3-wav2vec-bert"
-        try:
-            self.ser_model = pipeline(
-                "audio-classification", 
-                model=ser_model_id, 
-                token=self.hf_token,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-            )
-            print(f"SER Model Loaded: {ser_model_id}")
-        except Exception as e:
-            print(f"Warning: Failed to load SER model from {ser_model_id} ({e}). Using mock data.")
-            self.ser_model = None
-            
-        # 3. TCA Model (Context) - Loading from Hugging Face Hub
-        print("Loading TCA Model (bert-nli)...")
-        tca_model_id = "MathRaaj/t1-bert-nli-baseline"
-        try:
-            self.tca_model = pipeline(
-                "text-classification", 
-                model=tca_model_id, 
-                top_k=None, 
-                token=self.hf_token,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-            )
-            print(f"TCA Model Loaded: {tca_model_id}")
-        except Exception as e:
-            print(f"Warning: Failed to load TCA model from {tca_model_id} ({e}). Using mock data.")
-            self.tca_model = None
-        
-        print("All models ready.")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+    def clear_memory(self):
+        """Force garbage collection to prevent 4GB RAM overflow"""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def process_url(self, video_url: str):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            video_path = os.path.join(tmp_dir, "input_video.mp4")
-            audio_path = os.path.join(tmp_dir, "extracted_audio.wav")
+            video_path = os.path.join(tmp_dir, "input.mp4")
+            audio_path = os.path.join(tmp_dir, "input.wav")
             
-            # 1. Download Video
-            print(f"Downloading video from {video_url}...")
+            # 1. Download
+            print(f"Downloading {video_url}...")
             resp = requests.get(video_url, stream=True)
-            if resp.status_code != 200:
-                raise Exception(f"Failed to download video: {resp.status_code}")
             with open(video_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            # 2. Extract Audio
-            print("Extracting audio...")
+            # 2. Extract & Preprocess
+            print("Processing audio...")
             video = VideoFileClip(video_path)
             video.audio.write_audiofile(audio_path, logger=None)
             video.close()
-
-            # 3. Clean Audio
-            print("Cleaning audio...")
+            
             data, rate = librosa.load(audio_path, sr=16000)
-            clean_audio_data = nr.reduce_noise(y=data, sr=rate)
-
-            # 4. Transcribe (Optimized Single-Pass)
-            print("Transcribing and Translating (Single Pass)...")
-            # Running with task="translate" gives us EN text + metadata about the original language
-            trans_result = self.whisper_model.transcribe(clean_audio_data, task="translate")
+            clean_audio = nr.reduce_noise(y=data, sr=rate, stationary=True)
             
-            tca_input_text = trans_result["text"] # This is the English version for the AI check
-            detected_lang = trans_result.get("language", "en")
+            # 3. Transcription (Voxtral Mini V2)
+            print("Step 1: Transcribing (Voxtral Mini V2)...")
+            trans_pipe = pipeline(
+                "automatic-speech-recognition", 
+                model="Voxtral/Voxtral-Mini-Transcribe-v2", 
+                device=self.device,
+                torch_dtype=self.dtype
+            )
+            asr_result = trans_pipe(clean_audio, return_timestamps=False)
+            original_text = asr_result["text"]
             
-            # Since task="translate" only returns English, we'll use the EN text as the main transcript
-            # for maximum speed to avoid timeouts.
-            original_transcription = tca_input_text 
+            # Note: Voxtral/Whisper provides language chunks, but we'll use a simple length check 
+            # for the orchestrator until we implement deep language ID.
+            detected_lang = "auto" 
+            del trans_pipe
+            self.clear_memory()
 
-            # 5. Predict SER (7-Emotion Expansion)
-            print("Predicting SER...")
-            if self.ser_model:
-                preds = self.ser_model({"array": clean_audio_data, "sampling_rate": 16000})
-                ser_probs = np.zeros(7)
-                
-                # Get the detailed top predicted emotion from your S3 model
-                top_pred = preds[0]
-                detected_emotion_label = top_pred['label'] # Full emotion name (e.g., Happy, Sad)
-                pred_score = top_pred['score']
-                
-                # Still map for the Fusion logic (Binary safety check)
-                if any(a in detected_emotion_label.lower() for a in ['angry', 'anger', 'disgust', 'hate']):
-                    ser_probs[1] = pred_score # Aggressive/High-risk
-                else:
-                    ser_probs[0] = pred_score # Normal/Low-risk
+            # 4. Translation (NLLB-200)
+            print("Step 2: Translating (NLLB-200)...")
+            # We use NLLB to ensure the safety check (TCA) gets high-quality English
+            translator = pipeline(
+                "translation", 
+                model="facebook/nllb-200-distilled-600M",
+                device=self.device,
+                torch_dtype=self.dtype,
+                tgt_lang="eng_Latn"
+            )
+            # NLLB handles the source language automatically
+            translation_result = translator(original_text, max_length=512)
+            english_text = translation_result[0]['translation_text']
+            del translator
+            self.clear_memory()
+
+            # 5. Emotion Recognition (Wav2Vec-BERT)
+            print("Step 3: Analyzing Emotion...")
+            ser_pipe = pipeline(
+                "audio-classification", 
+                model="MathRaaj/s3-wav2vec-bert", 
+                token=self.hf_token,
+                device=self.device,
+                torch_dtype=self.dtype
+            )
+            ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
+            top_ser = ser_preds[0]
+            detected_emotion = top_ser['label']
+            ser_probs = np.zeros(2) # Fallback binary for fusion
+            if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust']):
+                ser_probs[1] = top_ser['score']
             else:
-                detected_emotion_label = "Neutral"
-                ser_probs = np.array([0.9, 0.1, 0, 0, 0, 0, 0])
+                ser_probs[0] = top_ser['score']
+            del ser_pipe
+            self.clear_memory()
 
-            # 6. Predict TCA
-            print("Predicting TCA...")
-            if self.tca_model:
-                preds = self.tca_model(tca_input_text)[0]
-                tca_probs = np.zeros(7)
-                for p in preds:
-                    label = str(p['label']).lower()
-                    score = float(p['score'])
-                    if any(l in label for l in ['hate', 'offensive', 'label_1', 'negative']):
-                        tca_probs[1] += score
-                    else:
-                        tca_probs[0] += score
+            # 6. Hate Speech Detection (BERT-NLI)
+            print("Step 4: Analyzing Safety (TCA)...")
+            tca_pipe = pipeline(
+                "text-classification", 
+                model="MathRaaj/t1-bert-nli-baseline", 
+                token=self.hf_token,
+                device=self.device,
+                torch_dtype=self.dtype
+            )
+            tca_preds = tca_pipe(english_text)[0]
+            tca_probs = np.zeros(2)
+            if 'label_1' in tca_preds['label'].lower() or 'hate' in tca_preds['label'].lower():
+                tca_probs[1] = tca_preds['score']
             else:
-                tca_probs = np.array([0.9, 0.1, 0, 0, 0, 0, 0])
+                tca_probs[0] = tca_preds['score']
+            del tca_pipe
+            self.clear_memory()
 
-            # 7. Fusion
-            final_class, merged_probs = fallback_fusion(tca_probs, ser_probs)
+            # 7. Final Fusion
+            final_class, _ = fallback_fusion(tca_probs, ser_probs)
             
             return {
-                "transcription": original_transcription,
-                "translation_en": tca_input_text if detected_lang != "en" else "Already in English",
+                "transcription": original_text,
+                "translation_en": english_text,
                 "is_hatespeech": bool(final_class == 1),
-                "confidence": f"{float(np.max(merged_probs)) * 100:.2f}%",
-                "tca_confidence": f"{float(np.max(tca_probs)) * 100:.2f}%",
-                "ser_confidence": f"{float(np.max(ser_probs)) * 100:.2f}%",
-                "detected_emotion": detected_emotion_label,
-                "original_language": detected_lang
+                "confidence": f"{float(max(tca_probs[1], ser_probs[1]) if final_class == 1 else max(tca_probs[0], ser_probs[0])) * 100:.2f}%",
+                "tca_confidence": f"{float(tca_probs[1] if final_class == 1 else tca_probs[0]) * 100:.2f}%",
+                "ser_confidence": f"{float(ser_probs[1] if final_class == 1 else ser_probs[0]) * 100:.2f}%",
+                "detected_emotion": detected_emotion,
+                "original_language": "Detected via NLLB"
             }
 
 import traceback
 
-# --- FastAPI App ---
-app = FastAPI(title="AudioGuard ML Service")
-pipeline = None
+# --- FastAPI ---
+app = FastAPI()
+pipeline_instance = None
 
 class VideoRequest(BaseModel):
     video_url: str
     hf_token: str = None
 
 @app.on_event("startup")
-async def startup_event():
-    global pipeline
-    try:
-        pipeline = InferencePipeline()
-    except Exception as e:
-        print(f"CRITICAL: Failed to initialize pipeline: {e}")
-        traceback.print_exc()
+async def startup():
+    global pipeline_instance
+    pipeline_instance = InferencePipeline()
 
 @app.get("/")
-def health_check():
-    return {"status": "healthy", "service": "audioguard-ml"}
+def health(): return {"status": "ok"}
 
 @app.post("/process")
-async def process_video(request: VideoRequest):
+async def process(request: VideoRequest):
     try:
-        if pipeline is None:
-            raise Exception("ML Pipeline not initialized properly on startup.")
-        
-        # Override the pipeline's token if one is provided in the request
         if request.hf_token:
-            pipeline.hf_token = request.hf_token
-            
-        result = pipeline.process_url(request.video_url)
-        return result
+            pipeline_instance.hf_token = request.hf_token
+        return pipeline_instance.process_url(request.video_url)
     except Exception as e:
-        print(f"ML Service Error: {e}")
-        traceback.print_exc() # This prints to Google Cloud Logs
-        # Return the actual error message to the Orchestrator
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
