@@ -28,12 +28,12 @@ class InferencePipeline:
         self.hf_token = os.getenv("HF_TOKEN")
         
         # 1. Whisper (Transcription)
-        print("Loading Whisper 'base' model...")
-        self.whisper_model = whisper.load_model("base")
+        print("Loading Whisper 'small' model (Verbatim Update)...")
+        self.whisper_model = whisper.load_model("small")
         
         # 2. SER Model (Emotion) - Loading from Hugging Face Hub
-        print("Loading SER Model (wav2vec2-large)...")
-        ser_model_id = "MathRaaj/S4_wav2vec2_large"
+        print("Loading SER Model (wav2vec-bert)...")
+        ser_model_id = "MathRaaj/s3-wav2vec-bert"
         try:
             self.ser_model = pipeline(
                 "audio-classification", 
@@ -47,8 +47,8 @@ class InferencePipeline:
             self.ser_model = None
             
         # 3. TCA Model (Context) - Loading from Hugging Face Hub
-        print("Loading TCA Model (deberta-large-nli)...")
-        tca_model_id = "MathRaaj/T3_deberta_large_nli"
+        print("Loading TCA Model (bert-nli)...")
+        tca_model_id = "MathRaaj/t1-bert-nli-baseline"
         try:
             self.tca_model = pipeline(
                 "text-classification", 
@@ -89,36 +89,49 @@ class InferencePipeline:
             data, rate = librosa.load(audio_path, sr=16000)
             clean_audio_data = nr.reduce_noise(y=data, sr=rate)
 
-            # 4. Transcribe
-            print("Transcribing...")
-            trans_result = self.whisper_model.transcribe(clean_audio_data, task="translate")
-            transcription = trans_result["text"]
+            # 4. Transcribe (Verbatim Original + English)
+            print("Transcribing (Verbatim)...")
+            trans_result = self.whisper_model.transcribe(clean_audio_data)
+            original_transcription = trans_result["text"]
+            detected_lang = trans_result.get("language", "en")
+            
+            # If not English, also get the English translation for the Safety Check (TCA)
+            if detected_lang != "en":
+                print(f"Detected {detected_lang}, translating to English for TCA...")
+                translation_result = self.whisper_model.transcribe(clean_audio_data, task="translate")
+                tca_input_text = translation_result["text"]
+            else:
+                tca_input_text = original_transcription
 
-            # 5. Predict SER
+            # 5. Predict SER (7-Emotion Expansion)
             print("Predicting SER...")
             if self.ser_model:
                 preds = self.ser_model({"array": clean_audio_data, "sampling_rate": 16000})
                 ser_probs = np.zeros(7)
-                # Map specific emotion labels to index 1 (hate/anger) or 0 (neutral)
-                # This matches the logic from your original inference_pipeline.py
-                pred_label = preds[0]['label'].lower()
-                pred_score = preds[0]['score']
-                if any(a in pred_label for a in ['angry', 'anger', 'hate']):
-                    ser_probs[1] = pred_score
+                
+                # Get the detailed top predicted emotion from your S3 model
+                top_pred = preds[0]
+                detected_emotion_label = top_pred['label'] # Full emotion name (e.g., Happy, Sad)
+                pred_score = top_pred['score']
+                
+                # Still map for the Fusion logic (Binary safety check)
+                if any(a in detected_emotion_label.lower() for a in ['angry', 'anger', 'disgust', 'hate']):
+                    ser_probs[1] = pred_score # Aggressive/High-risk
                 else:
-                    ser_probs[0] = pred_score
+                    ser_probs[0] = pred_score # Normal/Low-risk
             else:
+                detected_emotion_label = "Neutral"
                 ser_probs = np.array([0.9, 0.1, 0, 0, 0, 0, 0])
 
             # 6. Predict TCA
             print("Predicting TCA...")
             if self.tca_model:
-                preds = self.tca_model(transcription)[0]
+                preds = self.tca_model(tca_input_text)[0]
                 tca_probs = np.zeros(7)
                 for p in preds:
                     label = str(p['label']).lower()
                     score = float(p['score'])
-                    if 'hate' in label or 'offensive' in label or 'label_1' in label:
+                    if any(l in label for l in ['hate', 'offensive', 'label_1', 'negative']):
                         tca_probs[1] += score
                     else:
                         tca_probs[0] += score
@@ -129,12 +142,14 @@ class InferencePipeline:
             final_class, merged_probs = fallback_fusion(tca_probs, ser_probs)
             
             return {
-                "transcription": transcription,
+                "transcription": original_transcription,
+                "translation_en": tca_input_text if detected_lang != "en" else "Already in English",
                 "is_hatespeech": bool(final_class == 1),
                 "confidence": f"{float(np.max(merged_probs)) * 100:.2f}%",
                 "tca_confidence": f"{float(np.max(tca_probs)) * 100:.2f}%",
                 "ser_confidence": f"{float(np.max(ser_probs)) * 100:.2f}%",
-                "detected_emotion": "Aggressive/Angry" if np.argmax(ser_probs) == 1 else "Neutral"
+                "detected_emotion": detected_emotion_label,
+                "original_language": detected_lang
             }
 
 import traceback

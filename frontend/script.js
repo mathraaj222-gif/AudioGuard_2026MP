@@ -129,8 +129,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Update DOM elements
         document.getElementById('transcription-text').innerText = `"${data.transcription}"`;
-        document.getElementById('emotion-text').innerText = data.detected_emotion;
+        document.getElementById('emotion-text').innerText = data.detected_emotion.charAt(0).toUpperCase() + data.detected_emotion.slice(1);
         document.getElementById('confidence-text').innerText = data.confidence;
+        
+        // Language & Translation Logic
+        const langBadge = document.getElementById('lang-badge');
+        langBadge.innerText = (data.original_language || 'EN').toUpperCase();
+        
+        const translationCard = document.getElementById('translation-card');
+        if (data.original_language && data.original_language !== 'en' && data.translation_en) {
+            translationCard.classList.remove('hidden');
+            document.getElementById('translation-text').innerText = `"${data.translation_en}"`;
+        } else {
+            translationCard.classList.add('hidden');
+        }
 
         const badge = document.getElementById('decision-badge');
         if (data.is_hatespeech) {

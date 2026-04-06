@@ -43,16 +43,27 @@
 
         <section class="results-section hidden" id="results-section">
             <div class="results-header">
-                <h2>Analysis Results</h2>
+                <div class="results-title-group">
+                    <h2>Analysis Results</h2>
+                    <span class="lang-badge" id="lang-badge">EN</span>
+                </div>
                 <div class="badge" id="decision-badge">Safe</div>
             </div>
 
             <div class="results-grid">
                 <div class="result-card feature-card">
+                    <div class="card-icon"><i class="fa-solid fa-comment-dots"></i></div>
+                    <div class="card-info">
+                        <h3>Original Transcription</h3>
+                        <p id="transcription-text">"..."</p>
+                    </div>
+                </div>
+
+                <div class="result-card feature-card hidden" id="translation-card">
                     <div class="card-icon"><i class="fa-solid fa-language"></i></div>
                     <div class="card-info">
-                        <h3>Transcription</h3>
-                        <p id="transcription-text">"..."</p>
+                        <h3>English Translation</h3>
+                        <p id="translation-text">"..."</p>
                     </div>
                 </div>
 

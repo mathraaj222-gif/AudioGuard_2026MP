@@ -208,6 +208,23 @@ header {
     border-bottom: 1px solid var(--border-color);
 }
 
+.results-title-group {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.lang-badge {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--primary);
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 800;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    letter-spacing: 0.5px;
+}
+
 .badge {
     padding: 0.5rem 1.25rem;
     border-radius: 50px;
