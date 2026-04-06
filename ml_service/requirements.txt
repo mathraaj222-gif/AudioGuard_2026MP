@@ -5,6 +5,7 @@ requests
 numpy<2.0.0
 moviepy==2.2.1
 faster-whisper
+huggingface_hub
 librosa==0.10.1
 noisereduce==3.0.2
 transformers==4.38.2

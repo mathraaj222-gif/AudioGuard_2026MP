@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from moviepy import VideoFileClip
 from transformers import pipeline
 from faster_whisper import WhisperModel
+from huggingface_hub import login
 
 # --- Fusion Logic ---
 def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
@@ -23,8 +24,19 @@ def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
-        print("Initializing ML Service (Lazy + INT8 Mode)...")
+        print("Initializing ML Service (Lazy + INT8 + AUTH Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
+        
+        # LOG IN TO HF HUB TO BYPASS RATE LIMITS
+        if self.hf_token:
+            try:
+                login(token=self.hf_token)
+                os.environ["HF_HUB_TOKEN"] = self.hf_token
+                os.environ["HF_TOKEN"] = self.hf_token
+                print("Hugging Face Hub authenticated successfully!")
+            except Exception as e:
+                print(f"Warning: HF Login Failed: {e}")
+                
         self.device = "cpu" # Optimized for CPU in Cloud Run
         self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
