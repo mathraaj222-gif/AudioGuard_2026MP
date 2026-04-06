@@ -109,42 +109,53 @@ class InferencePipeline:
                 english_text = original_text # Fallback
 
             # 5. Emotion Recognition (Wav2Vec-BERT)
-            print("Step 3: Analyzing Emotion...")
-            ser_pipe = pipeline(
-                "audio-classification", 
-                model="MathRaaj/s3-wav2vec-bert", 
-                token=self.hf_token,
-                device=-1, # CPU
-                torch_dtype=self.dtype
-            )
-            ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
-            top_ser = ser_preds[0]
-            detected_emotion = top_ser['label']
-            ser_probs = np.zeros(2) 
-            if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust']):
-                ser_probs[1] = top_ser['score']
-            else:
-                ser_probs[0] = top_ser['score']
-            del ser_pipe
-            self.clear_memory()
+            print("Step 3: Analyzing Emotion (Wav2Vec-BERT)...")
+            try:
+                ser_pipe = pipeline(
+                    "audio-classification", 
+                    model="MathRaaj/s3-wav2vec-bert", 
+                    token=self.hf_token,
+                    device=-1, # CPU
+                    torch_dtype=self.dtype,
+                    trust_remote_code=True
+                )
+                ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
+                top_ser = ser_preds[0]
+                detected_emotion = top_ser['label']
+                ser_probs = np.zeros(2) 
+                if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust']):
+                    ser_probs[1] = top_ser['score']
+                else:
+                    ser_probs[0] = top_ser['score']
+                del ser_pipe
+                self.clear_memory()
+            except Exception as e:
+                print(f"SER Error: {e}")
+                detected_emotion = "neutral"
+                ser_probs = np.array([1.0, 0.0])
 
             # 6. Hate Speech Detection (BERT-NLI)
             print("Step 4: Analyzing Safety (TCA)...")
-            tca_pipe = pipeline(
-                "text-classification", 
-                model="MathRaaj/t1-bert-nli-baseline", 
-                token=self.hf_token,
-                device=-1, # CPU
-                torch_dtype=self.dtype
-            )
-            tca_preds = tca_pipe(english_text)[0]
-            tca_probs = np.zeros(2)
-            if 'label_1' in tca_preds['label'].lower() or 'hate' in tca_preds['label'].lower():
-                tca_probs[1] = tca_preds['score']
-            else:
-                tca_probs[0] = tca_preds['score']
-            del tca_pipe
-            self.clear_memory()
+            try:
+                tca_pipe = pipeline(
+                    "text-classification", 
+                    model="MathRaaj/t1-bert-nli-baseline", 
+                    token=self.hf_token,
+                    device=-1, # CPU
+                    torch_dtype=self.dtype,
+                    trust_remote_code=True
+                )
+                tca_preds = tca_pipe(english_text)[0]
+                tca_probs = np.zeros(2)
+                if 'label_1' in tca_preds['label'].lower() or 'hate' in tca_preds['label'].lower():
+                    tca_probs[1] = tca_preds['score']
+                else:
+                    tca_probs[0] = tca_preds['score']
+                del tca_pipe
+                self.clear_memory()
+            except Exception as e:
+                print(f"TCA Error: {e}")
+                tca_probs = np.array([1.0, 0.0])
 
             # 7. Final Fusion
             final_class, _ = fallback_fusion(tca_probs, ser_probs)
