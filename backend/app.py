@@ -3,24 +3,25 @@ import shutil
 import traceback
 import tempfile
 import requests
-from fastapi import FastAPI, Depends, Request, Form
+from fastapi import FastAPI, Depends, Request, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import uvicorn
 
-from database import engine, get_db, Base
+from database import engine, get_db, SessionLocal, Base
+import models
 from models import VideoRecord
 
-# Environment variables for service communication - STRIP TRAILING SLASH
+# Environment variables for service communication
 ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Initialize DB tables (Safe Startup)
+# Initialize DB tables
 try:
     Base.metadata.create_all(bind=engine)
 except Exception as e:
-    print(f"Database Initialization Warning: {e}. The app will continue, but first few saves might fail.")
+    print(f"Database Initialization Warning: {e}")
 
 app = FastAPI(title="AudioGuard Orchestrator API")
 
@@ -32,90 +33,116 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Background Task ---
+def perform_analysis_task(video_url: str, record_id: int):
+    """Heavy lifting AI task that runs in the background"""
+    db = SessionLocal()
+    try:
+        print(f"Bkg Task: Starting analysis for {video_url}...")
+        payload = {"video_url": video_url, "hf_token": HF_TOKEN}
+        resp = requests.post(f"{ML_SERVICE_URL}/process", json=payload, timeout=240)
+        
+        record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
+        if not record: return
+
+        if resp.status_code != 200:
+            print(f"Bkg Task: ML Service Error: {resp.text}")
+            record.status = "FAILED"
+        else:
+            data = resp.json()
+            record.transcription = data.get("transcription")
+            record.translation_en = data.get("translation_en")
+            record.original_language = data.get("original_language")
+            record.detected_emotion = data.get("detected_emotion")
+            record.is_hatespeech = data.get("is_hatespeech")
+            record.confidence = data.get("confidence")
+            record.tca_confidence = data.get("tca_confidence")
+            record.ser_confidence = data.get("ser_confidence")
+            record.status = "COMPLETED"
+        
+        db.commit()
+    except Exception as e:
+        print(f"Bkg Task: Failed: {e}")
+        record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
+        if record:
+            record.status = "FAILED"
+            db.commit()
+    finally:
+        db.close()
+
+# --- Routes ---
 @app.get("/")
 def health_check():
-    return {"status": "healthy", "service": "audioguard-backend"}
+    return {"status": "online", "service": "audioguard-orchestrator"}
 
 @app.post("/api/analyze")
 async def analyze_video(
+    background_tasks: BackgroundTasks,
     video_url: str = Form(...), 
     db: Session = Depends(get_db)
 ):
-    """
-    Receives a Cloudinary URL, delegates to ML Service, and stores results.
-    """
-    print(f"Received analyzed request for URL: {video_url}")
+    """Immediately returns 202 Accepted and starts AI in background"""
+    print(f"Orchestrator: Received Job for {video_url}")
     
-    try:
-        # 1. Delegate to ML Service (Google Cloud Run)
-        print(f"Forwarding to ML service: {ML_SERVICE_URL}/process")
-        try:
-            payload = {
-                "video_url": video_url,
-                "hf_token": HF_TOKEN
-            }
-            resp = requests.post(f"{ML_SERVICE_URL}/process", json=payload, timeout=120)
-            
-            if resp.status_code != 200:
-                print(f"ML Service Error ({resp.status_code}): {resp.text}")
-                return JSONResponse(
-                    status_code=resp.status_code, 
-                    content={"error": f"ML Service failure ({resp.status_code}): {resp.text}"}
-                )
-            
-            result = resp.json()
-        except requests.exceptions.Timeout:
-            print("Orchestrator Error: ML Service Timed Out")
-            return JSONResponse(status_code=504, content={"error": "The AI Brain is taking too long to load (Time Out). Please try again in 30 seconds."})
-        except Exception as forward_err:
-            print(f"Orchestrator Error during forwarding: {forward_err}")
-            traceback.print_exc()
-            return JSONResponse(status_code=500, content={"error": f"Failed to connect to ML Brain: {str(forward_err)}"})
-        
-        # 2. Save to Database (With Safety Net)
-        try:
-            db_record = VideoRecord(
-                filename=video_url.split("/")[-1],
-                transcription=result["transcription"],
-                detected_emotion=result["detected_emotion"],
-                is_hatespeech=result["is_hatespeech"],
-                confidence=result["confidence"],
-                tca_confidence=result["tca_confidence"],
-                ser_confidence=result["ser_confidence"]
-            )
-            db.add(db_record)
-            db.commit()
-            db.refresh(db_record)
-            result["db_id"] = db_record.id
-        except Exception as db_error:
-            print(f"Database Warning (Analysis finished but not saved): {db_error}")
-            traceback.print_exc()
-            result["db_id"] = None # Indicate it wasn't saved but valid
-        
-        # Return merged result
-        return JSONResponse(content=result)
-            
-    except Exception as e:
-        print(f"Orchestrator Error: {e}")
-        traceback.print_exc() # Print the full error in Railway logs
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    # 1. Create Initial Pending Record
+    new_record = VideoRecord(
+        filename=video_url.split("/")[-1],
+        video_url=video_url,
+        status="PENDING"
+    )
+    db.add(new_record)
+    db.commit()
+    db.refresh(new_record)
+
+    # 2. Add to Background Tasks
+    background_tasks.add_task(perform_analysis_task, video_url, new_record.id)
+
+    return JSONResponse(status_code=202, content={
+        "status": "PENDING",
+        "video_url": video_url,
+        "message": "Analysis started in background. Polling required."
+    })
+
+@app.get("/api/status")
+def get_status(video_url: str, db: Session = Depends(get_db)):
+    """Frontend checks this endpoint every few seconds"""
+    record = db.query(VideoRecord).filter(VideoRecord.video_url == video_url).order_by(VideoRecord.timestamp.desc()).first()
+    
+    if not record:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    
+    response = {
+        "status": record.status,
+        "video_url": record.video_url,
+        "results": None
+    }
+
+    if record.status == "COMPLETED":
+        response["results"] = {
+            "transcription": record.transcription,
+            "translation_en": record.translation_en,
+            "original_language": record.original_language,
+            "detected_emotion": record.detected_emotion,
+            "is_hatespeech": record.is_hatespeech,
+            "confidence": record.confidence,
+            "tca_confidence": record.tca_confidence,
+            "ser_confidence": record.ser_confidence
+        }
+    
+    return response
 
 @app.get("/api/videos")
 def get_videos(db: Session = Depends(get_db)):
-    """Retrieve history of analyzed videos"""
-    records = db.query(VideoRecord).order_by(VideoRecord.timestamp.desc()).all()
-    return records
+    return db.query(VideoRecord).order_by(VideoRecord.timestamp.desc()).all()
 
 @app.delete("/api/videos/{video_id}")
 def delete_video(video_id: int, db: Session = Depends(get_db)):
-    """Delete a video record"""
     record = db.query(VideoRecord).filter(VideoRecord.id == video_id).first()
     if record:
         db.delete(record)
         db.commit()
-        return {"status": "success", "message": "Record deleted"}
-    return JSONResponse(content={"error": "Not found"}, status_code=404)
+        return {"status": "success"}
+    return JSONResponse(status_code=404, content={"error": "Not found"})
 
 if __name__ == "__main__":
-    print("Run this app via: uvicorn app:app --reload")
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)

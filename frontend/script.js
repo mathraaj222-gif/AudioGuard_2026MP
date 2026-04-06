@@ -75,7 +75,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function uploadFileToAPI(file) {
         try {
             // 1. Upload to Cloudinary
-            statusText.innerText = "Uploading to Secure Cloud Storage...";
+            statusText.innerText = "Step 1/2: Uploading to Secure Storage...";
             const cloudFormData = new FormData();
             cloudFormData.append('file', file);
             cloudFormData.append('upload_preset', CLOUDINARY_PRESET);
@@ -92,10 +92,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const cloudData = await cloudResponse.json();
             const videoUrl = cloudData.secure_url;
-            console.log("Cloudinary URL:", videoUrl);
 
-            // 2. Send URL to Railway Backend for Analysis
-            statusText.innerText = "Running Deep Learning Models (TCA & SER)...";
+            // 2. Start Analysis
+            statusText.innerText = "Step 2/2: Starting Deep AI Analysis...";
             const backendFormData = new FormData();
             backendFormData.append('video_url', videoUrl);
 
@@ -104,38 +103,61 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: backendFormData
             });
 
-            if (!response.ok) {
-                throw new Error("Failed to process file.");
-            }
-
-            const data = await response.json();
-
-            // Artificial delay to mimic heavy processing for "wow" factor if it responds too fast locally
-            setTimeout(() => {
+            if (response.status === 202) {
+                statusText.innerText = "AI Processing... This might take 30-60s.";
+                pollStatus(videoUrl);
+            } else if (response.ok) {
+                const data = await response.json();
                 showResults(data);
-            }, 1000);
+            } else {
+                throw new Error("Failed to start analysis");
+            }
 
         } catch (error) {
             console.error(error);
-            alert("Error processing the video/audio. Check console.");
+            alert(`Error: ${error.message}`);
             processingState.classList.add('hidden');
             uploadZone.classList.remove('hidden');
         }
+    }
+
+    async function pollStatus(videoUrl) {
+        const interval = 3000; // 3 seconds
+        const timer = setInterval(async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/status?video_url=${encodeURIComponent(videoUrl)}`);
+                if (!response.ok) return;
+
+                const data = await response.json();
+                if (data.status === 'COMPLETED') {
+                    clearInterval(timer);
+                    showResults(data.results);
+                } else if (data.status === 'FAILED') {
+                    clearInterval(timer);
+                    alert("The AI Analysis failed for this specific video. Try another file.");
+                    processingState.classList.add('hidden');
+                    uploadZone.classList.remove('hidden');
+                }
+            } catch (err) {
+                console.warn("Polling error:", err);
+            }
+        }, interval);
     }
 
     function showResults(data) {
         processingState.classList.add('hidden');
         resultsSection.classList.remove('hidden');
 
-        // Update DOM elements
+        // Update Text
         document.getElementById('transcription-text').innerText = `"${data.transcription}"`;
-        document.getElementById('emotion-text').innerText = data.detected_emotion.charAt(0).toUpperCase() + data.detected_emotion.slice(1);
+        document.getElementById('emotion-text').innerText = data.detected_emotion;
         document.getElementById('confidence-text').innerText = data.confidence;
         
-        // Language & Translation Logic
+        // Language Badge
         const langBadge = document.getElementById('lang-badge');
         langBadge.innerText = (data.original_language || 'EN').toUpperCase();
         
+        // Translation Logic
         const translationCard = document.getElementById('translation-card');
         if (data.original_language && data.original_language !== 'en' && data.translation_en) {
             translationCard.classList.remove('hidden');
@@ -144,16 +166,15 @@ document.addEventListener('DOMContentLoaded', () => {
             translationCard.classList.add('hidden');
         }
 
+        // Final Badge
         const badge = document.getElementById('decision-badge');
         if (data.is_hatespeech) {
             badge.className = 'badge danger';
             badge.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Hate Speech Detected';
-            // Also add a red tint to the glow background for extra effect
             document.querySelector('.glow-bg').style.background = 'radial-gradient(circle at 50% 50%, rgba(239, 68, 68, 0.3) 0%, transparent 60%)';
         } else {
             badge.className = 'badge safe';
-            badge.innerHTML = '<i class="fa-solid fa-shield-check"></i> Safe Content';
-            // Restore normal glow background
+            badge.innerHTML = '<i class="fa-solid fa-circle-check"></i> Analysis Safe';
             document.querySelector('.glow-bg').style.background = 'radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.3) 0%, transparent 60%)';
         }
     }
