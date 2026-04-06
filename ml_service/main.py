@@ -21,6 +21,14 @@ def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
     else:
         return np.argmax(ser_probs), ser_probs
 
+# --- Language Mapping (Whisper to NLLB-200) ---
+LANGUAGE_MAPPING = {
+    "en": "eng_Latn", "ms": "zsm_Latn", "id": "ind_Latn", "es": "spa_Latn",
+    "fr": "fra_Latn", "de": "deu_Latn", "it": "ita_Latn", "pt": "por_Latn",
+    "ar": "ara_Arab", "zh": "zho_Hans", "ja": "jpn_Jpan", "ko": "kor_Kore",
+    "hi": "hin_Deva", "ta": "tam_Taml", "te": "tel_Telu", "ru": "rus_Cyrl"
+}
+
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
@@ -70,7 +78,6 @@ class InferencePipeline:
             # 3. Transcription (Manual Snapshot Download for Stability)
             print("Step 1: Fetching & Transcribing (Small INT8)...")
             try:
-                # MANUALLY DOWNLOAD THE MODEL TO ENSURE A CLEAN SLATE
                 model_path = snapshot_download(
                     repo_id="Systran/faster-whisper-small", 
                     token=self.hf_token,
@@ -90,23 +97,29 @@ class InferencePipeline:
                 print(f"Whisper Fetch/Optimization Error: {e}")
                 raise e
 
-            # 4. Translation (NLLB-200) - Enhanced world-class translation
-            print("Step 2: Translating (NLLB-200)...")
-            try:
-                translator = pipeline(
-                    "translation", 
-                    model="facebook/nllb-200-distilled-600M",
-                    device=-1, # CPU
-                    torch_dtype=self.dtype,
-                    tgt_lang="eng_Latn"
-                )
-                translation_result = translator(original_text, max_length=512)
-                english_text = translation_result[0]['translation_text']
-                del translator
-                self.clear_memory()
-            except Exception as e:
-                print(f"NLLB Translation Error: {e}")
-                english_text = original_text # Fallback
+            # 4. Translation (NLLB-200) - Smarter Polyglot logic
+            if detected_lang == "en" or not original_text.strip():
+                print("Step 2: Skipping Translation (Already English or Empty)")
+                english_text = original_text
+            else:
+                print(f"Step 2: Translating from {detected_lang} (NLLB-200)...")
+                try:
+                    src_lang_code = LANGUAGE_MAPPING.get(detected_lang, "eng_Latn")
+                    translator = pipeline(
+                        "translation", 
+                        model="facebook/nllb-200-distilled-600M",
+                        device=-1, # CPU
+                        torch_dtype=self.dtype,
+                        src_lang=src_lang_code,
+                        tgt_lang="eng_Latn"
+                    )
+                    translation_result = translator(original_text, max_length=512)
+                    english_text = translation_result[0]['translation_text']
+                    del translator
+                    self.clear_memory()
+                except Exception as e:
+                    print(f"NLLB Translation Error: {e}")
+                    english_text = original_text # Fallback
 
             # 5. Emotion Recognition (Wav2Vec-BERT)
             print("Step 3: Analyzing Emotion (Wav2Vec-BERT)...")
