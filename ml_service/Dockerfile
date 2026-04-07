@@ -1,35 +1,35 @@
-# Use official Python 3.11 slim image
-FROM python:3.11-slim
+# Use a specific stable version
+FROM python:3.11-slim-bookworm
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# 1. Install ONLY necessary system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpq-dev \
     gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install
+# 2. Optimization: Install requirements first (better caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the caching utility and pre-download models
-# Note: Use --build-arg HF_TOKEN=... if pre-downloading private models
+# 3. Pre-cache models (Passing HF_TOKEN if needed)
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
 COPY cache_models.py .
-RUN python cache_models.py
+# Run caching - we use a shell to ensure it cleans up
+RUN python cache_models.py && rm cache_models.py
 
-# Copy the rest of the application code
+# 4. Copy app code
 COPY . .
 
-# Expose port (Cloud Run sets $PORT)
+# 5. Production Env Vars
+ENV TORCH_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV PORT=8080
+
 EXPOSE 8080
 
-# Production settings: One thread, minimal workers for 4GB RAM
-ENV TORCH_NUM_THREADS=1
-
-# Command to run the application using uvicorn
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1"]
