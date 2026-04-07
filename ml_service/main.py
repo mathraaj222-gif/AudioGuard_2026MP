@@ -12,6 +12,7 @@ from moviepy import VideoFileClip
 from transformers import pipeline
 from faster_whisper import WhisperModel
 from huggingface_hub import login, snapshot_download
+import traceback
 
 # --- Fusion Logic ---
 def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
@@ -32,7 +33,7 @@ LANGUAGE_MAPPING = {
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
-        print("Initializing ML Service (Lazy + INT8 + AUTH Mode)...")
+        print("Initializing ML Service (Universal + Fast-CNN + AUTH Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
         
         # LOG IN TO HF HUB AT STARTUP
@@ -55,24 +56,37 @@ class InferencePipeline:
             torch.cuda.empty_cache()
 
     def process_url(self, video_url: str):
+        # 0. DETECT IF INPUT IS AUDIO OR VIDEO
+        is_audio = any(video_url.lower().endswith(ext) for ext in ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'])
+        
         with tempfile.TemporaryDirectory() as tmp_dir:
-            video_path = os.path.join(tmp_dir, "input.mp4")
-            audio_path = os.path.join(tmp_dir, "input.wav")
+            file_path = os.path.join(tmp_dir, "input_source")
+            audio_path = os.path.join(tmp_dir, "processed_audio.wav")
             
             # 1. Download
-            print(f"Downloading video from {video_url}...")
+            print(f"Downloading source from {video_url}...")
             resp = requests.get(video_url, stream=True)
-            with open(video_path, 'wb') as f:
+            with open(file_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            # 2. Extract & Preprocess
-            print("Processing audio extraction...")
-            video = VideoFileClip(video_path)
-            video.audio.write_audiofile(audio_path, logger=None)
-            video.close()
+            # 2. Extract & Preprocess (Conditional Format Switch)
+            if is_audio:
+                print("Step 0: Detected pure audio. Skipping video extraction.")
+                audio_source = file_path
+            else:
+                print("Step 0: Detected video. Extracting audio track...")
+                try:
+                    video = VideoFileClip(file_path)
+                    video.audio.write_audiofile(audio_path, logger=None)
+                    video.close()
+                    audio_source = audio_path
+                except Exception as e:
+                    print(f"Warning: Extraction issue: {e}. Falling back to direct load.")
+                    audio_source = file_path
             
-            data, rate = librosa.load(audio_path, sr=16000)
+            print("Step 0.1: Resampling audio for AI analysis...")
+            data, rate = librosa.load(audio_source, sr=16000)
             clean_audio = nr.reduce_noise(y=data, sr=rate, stationary=True)
             
             # 3. Transcription (Manual Snapshot Download for Stability)
@@ -121,12 +135,12 @@ class InferencePipeline:
                     print(f"NLLB Translation Error: {e}")
                     english_text = original_text # Fallback
 
-            # 5. Emotion Recognition (Wav2Vec-BERT)
-            print("Step 3: Analyzing Emotion (Wav2Vec-BERT)...")
+            # 5. Emotion Recognition (Fast-CNN-BiLSTM)
+            print("Step 3: Analyzing Emotion (MathRaaj/ser-fast-cnn-bilstm)...")
             try:
                 ser_pipe = pipeline(
                     "audio-classification", 
-                    model="MathRaaj/s3-wav2vec-bert", 
+                    model="MathRaaj/ser-fast-cnn-bilstm", 
                     token=self.hf_token,
                     device=-1, # CPU
                     torch_dtype=self.dtype,
@@ -135,8 +149,10 @@ class InferencePipeline:
                 ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
                 top_ser = ser_preds[0]
                 detected_emotion = top_ser['label']
+                
+                # REAL SCORE FUSION (NO DEFAULTS)
                 ser_probs = np.zeros(2) 
-                if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust']):
+                if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust', 'fear']):
                     ser_probs[1] = top_ser['score']
                 else:
                     ser_probs[0] = top_ser['score']
@@ -144,7 +160,7 @@ class InferencePipeline:
                 self.clear_memory()
             except Exception as e:
                 print(f"SER Error: {e}")
-                detected_emotion = "neutral"
+                detected_emotion = "Analysis Error"
                 ser_probs = np.array([1.0, 0.0])
 
             # 6. Hate Speech Detection (BERT-NLI)
@@ -170,7 +186,7 @@ class InferencePipeline:
                 print(f"TCA Error: {e}")
                 tca_probs = np.array([1.0, 0.0])
 
-            # 7. Final Fusion
+            # 7. Final Fusion (Dynamic Result Rendering)
             final_class, _ = fallback_fusion(tca_probs, ser_probs)
             
             return {
@@ -183,8 +199,6 @@ class InferencePipeline:
                 "detected_emotion": detected_emotion,
                 "original_language": detected_lang
             }
-
-import traceback
 
 # --- FastAPI ---
 app = FastAPI()
@@ -209,13 +223,10 @@ async def process(request: VideoRequest):
             pipeline_instance.hf_token = request.hf_token
         return pipeline_instance.process_url(request.video_url)
     except Exception as e:
-        # RETURN THE ACTUAL ERROR MESSAGE SO THE UI CAN SHOW IT
         error_name = type(e).__name__
         error_msg = str(e)
         print(f"ML Service Failure ({error_name}): {error_msg}")
         traceback.print_exc()
-        # We return a successful HTTP 200 but including a failure status in the JSON 
-        # so the orchestrator can read it peacefully without crashing.
         return {
             "status": "failed",
             "error_detail": f"AI Brain Error ({error_name}): {error_msg}"

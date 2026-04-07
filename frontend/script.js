@@ -55,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
         processingState.classList.remove('hidden');
 
         // Initial Status
-        statusText.innerText = "Extracting and Analyzing Audio...";
+        statusText.innerText = "Extracting and Analyzing Media...";
 
         // Simulate small delay for UI UX even if it's fast
         setTimeout(() => {
