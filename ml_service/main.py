@@ -9,7 +9,7 @@ import gc
 import traceback
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from moviepy import VideoFileClip
+from moviepy.editor import VideoFileClip
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForAudioClassification, AutoModelForSequenceClassification
 from faster_whisper import WhisperModel
 from huggingface_hub import login, snapshot_download
@@ -58,32 +58,54 @@ class InferenceEngine:
 
     def get_whisper(self):
         if self.whisper is None:
-            print("Loading Faster-Whisper Small (CPU INT8)...")
-            # Snapshot ensures we use the cached version from Docker build
+            print("Action: Loading Faster-Whisper Small (CPU INT8)...")
             path = snapshot_download(repo_id="Systran/faster-whisper-small")
             self.whisper = WhisperModel(path, device="cpu", compute_type="int8")
         return self.whisper
 
     def get_translator(self):
         if self.translator is None:
-            # SWAP: NLLB-200 (2.4GB) -> OPUS-MT (300MB)
-            print("Loading Helsinki-NLP/opus-mt-mul-en (Lightweight)...")
+            print("Action: Loading Helsinki-NLP/opus-mt-mul-en (Lightweight)...")
             model_id = "Helsinki-NLP/opus-mt-mul-en"
             self.translator = pipeline("translation", model=model_id, device=-1)
         return self.translator
 
     def get_ser(self):
+        """Explicitly handles the custom BiLSTM-Attention architecture loading."""
         if self.ser_model is None:
-            print("Loading MathRaaj/ser-fast-cnn-bilstm (PyTorch)...")
+            print("Action: Initializing Custom SER Model (MathRaaj/ser-fast-cnn-bilstm)...")
             model_id = "MathRaaj/ser-fast-cnn-bilstm"
-            self.ser_model = pipeline("audio-classification", model=model_id, device=-1, trust_remote_code=True)
+            try:
+                # Explicitly use trust_remote_code and let AutoModel handle the custom cnn-bilstm-attention
+                self.ser_model = pipeline(
+                    "audio-classification", 
+                    model=model_id, 
+                    device=-1, 
+                    trust_remote_code=True
+                )
+                print("SER Activation: Success!")
+            except Exception as e:
+                print(f"SER Activation Failure: {e}")
+                traceback.print_exc()
+                raise e
         return self.ser_model
 
     def get_tca(self):
         if self.tca_model is None:
-            print("Loading MathRaaj/t1-bert-nli-baseline (Safety)...")
+            print("Action: Initializing Custom TCA Model (MathRaaj/t1-bert-nli-baseline)...")
             model_id = "MathRaaj/t1-bert-nli-baseline"
-            self.tca_model = pipeline("text-classification", model=model_id, device=-1, trust_remote_code=True)
+            try:
+                self.tca_model = pipeline(
+                    "text-classification", 
+                    model=model_id, 
+                    device=-1, 
+                    trust_remote_code=True
+                )
+                print("TCA Activation: Success!")
+            except Exception as e:
+                print(f"TCA Activation Failure: {e}")
+                traceback.print_exc()
+                raise e
         return self.tca_model
 
     # --- Processing Stages ---
@@ -109,15 +131,18 @@ class InferenceEngine:
                 audio_entry = source_path
             else:
                 try:
+                    # USE STABLE MOVIEYPY v1 SYNTAX (NO VERBOSE ERROR)
                     video = VideoFileClip(source_path)
-                    video.audio.write_audiofile(audio_path, logger=None)
+                    video.audio.write_audiofile(audio_path, verbose=False, logger=None)
                     video.close()
                     audio_entry = audio_path
-                except Exception:
+                except Exception as e:
+                    print(f"Audio Extraction Warning (Verbose Sync): {e}")
                     audio_entry = source_path # Fallback
 
-            # PRE-PROCESSING
+            # PRE-PROCESSING (STABLE NOREDUCE)
             y, sr = librosa.load(audio_entry, sr=16000)
+            # No verbose argument for NoiseReduce 2.x/3.x stability
             clean_y = nr.reduce_noise(y=y, sr=sr, stationary=True)
             self.clear_memory()
 
@@ -127,9 +152,9 @@ class InferenceEngine:
                 segments, info = whisper.transcribe(clean_y, beam_size=5)
                 transcription = "".join([s.text for s in segments]).strip()
                 detected_lang = info.language
-                print(f"Whisper Info: Language={detected_lang}")
+                print(f"Whisper Meta: Language={detected_lang}")
             except Exception as e:
-                print(f"Whisper Error: {e}")
+                print(f"Whisper AI Failure: {e}")
                 transcription = ""
                 detected_lang = "en"
 
@@ -141,11 +166,10 @@ class InferenceEngine:
             else:
                 try:
                     translator = self.get_translator()
-                    # Opus-MT translates automatically from multilingual to EN
                     res = translator(transcription, max_length=512)
                     english_text = res[0]['translation_text']
                 except Exception as e:
-                    print(f"Translation Error: {e}")
+                    print(f"Translation AI Failure: {e}")
                     english_text = transcription
             
             self.clear_memory()
@@ -162,7 +186,7 @@ class InferenceEngine:
                 else:
                     ser_probs[0] = top_ser['score']
             except Exception as e:
-                print(f"SER Error: {e}")
+                print(f"Emotion AI Failure: {e}")
                 emotion = "Analysis Error"
                 ser_probs = np.array([1.0, 0.0])
 
@@ -180,7 +204,7 @@ class InferenceEngine:
                     tca_label = "Safe Social Context"
                     tca_probs[0] = tca_res['score']
             except Exception as e:
-                print(f"TCA Error: {e}")
+                print(f"Safety AI Failure: {e}")
                 tca_label = "Analysis Not Available"
                 tca_probs = np.array([1.0, 0.0])
 
@@ -222,9 +246,11 @@ async def process(request: RequestModel):
             
         return engine.analyze_source(request.video_url)
     except Exception as e:
-        print(f"System Failure: {e}")
+        error_name = type(e).__name__
+        error_msg = str(e)
+        print(f"ML Service Restoration Failure ({error_name}): {error_msg}")
         traceback.print_exc()
         return {
             "status": "failed",
-            "error_detail": f"Production Engine Failure: {str(e)}"
+            "error_detail": f"Engine Restoration Failed: {str(e)}"
         }
