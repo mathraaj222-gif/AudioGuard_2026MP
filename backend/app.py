@@ -220,4 +220,6 @@ def delete_video(video_id: int, db: Session = Depends(get_db)):
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000)
+    # Cloud Run provides the PORT environment variable
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

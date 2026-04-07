@@ -31,6 +31,10 @@ gcloud builds submit --tag ${IMAGE_BASE}/tca-svc ./ml_services/tca-svc &
 gcloud builds submit --tag ${IMAGE_BASE}/backend ./backend &
 wait
 
+# Small delay to ensure Registry is synchronized before deployment starts
+echo "⏳ Waiting for Registry synchronization..."
+sleep 10
+
 # 5. Deploy AI Services (To get URLs)
 echo "🚀 Deploying AI Microservices..."
 gcloud run deploy whisper-svc --image ${IMAGE_BASE}/whisper-svc --region ${REGION} --platform managed --memory 4Gi --cpu 2 --allow-unauthenticated --no-cpu-throttling --quiet

@@ -12,7 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-cache models for Cloud Run fast startup
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small')"
-RUN python -c "from transformers import pipeline; pipeline('translation', model='Helsinki-NLP/opus-mt-mul-en')"
+RUN python -c "from transformers import AutoTokenizer, AutoModelForSeq2SeqLM; \
+    model_id='Helsinki-NLP/opus-mt-mul-en'; \
+    AutoTokenizer.from_pretrained(model_id); \
+    AutoModelForSeq2SeqLM.from_pretrained(model_id)"
 
 COPY . .
 
