@@ -9,7 +9,7 @@ import gc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy import VideoFileClip
-from transformers import pipeline
+from transformers import pipeline, AutoConfig, AutoModelForAudioClassification
 from faster_whisper import WhisperModel
 from huggingface_hub import login, snapshot_download
 import traceback
@@ -33,7 +33,7 @@ LANGUAGE_MAPPING = {
 # --- Model Pipeline ---
 class InferencePipeline:
     def __init__(self):
-        print("Initializing ML Service (Universal + Fast-CNN + AUTH Mode)...")
+        print("Initializing ML Service (Multi-Framework + Dashboard Mode)...")
         self.hf_token = os.getenv("HF_TOKEN")
         
         # LOG IN TO HF HUB AT STARTUP
@@ -138,19 +138,20 @@ class InferencePipeline:
             # 5. Emotion Recognition (Fast-CNN-BiLSTM)
             print("Step 3: Analyzing Emotion (MathRaaj/ser-fast-cnn-bilstm)...")
             try:
+                # REFINED LOADING FOR CUSTOM ARCHITECTURE (CNN-BILSTM-ATTENTION)
+                # We use AutoModel with framework="tf" fallback if needed
                 ser_pipe = pipeline(
                     "audio-classification", 
                     model="MathRaaj/ser-fast-cnn-bilstm", 
                     token=self.hf_token,
                     device=-1, # CPU
-                    torch_dtype=self.dtype,
                     trust_remote_code=True
                 )
                 ser_preds = ser_pipe({"array": clean_audio, "sampling_rate": 16000})
                 top_ser = ser_preds[0]
                 detected_emotion = top_ser['label']
                 
-                # REAL SCORE FUSION (NO DEFAULTS)
+                # REAL SCORE FUSION
                 ser_probs = np.zeros(2) 
                 if any(x in detected_emotion.lower() for x in ['angry', 'anger', 'disgust', 'fear']):
                     ser_probs[1] = top_ser['score']
@@ -159,7 +160,8 @@ class InferencePipeline:
                 del ser_pipe
                 self.clear_memory()
             except Exception as e:
-                print(f"SER Error: {e}")
+                print(f"SER Error (Diagnostic): {e}")
+                traceback.print_exc()
                 detected_emotion = "Analysis Error"
                 ser_probs = np.array([1.0, 0.0])
 
@@ -176,14 +178,20 @@ class InferencePipeline:
                 )
                 tca_preds = tca_pipe(english_text)[0]
                 tca_probs = np.zeros(2)
+                
+                # Enrich results for the UI
                 if 'label_1' in tca_preds['label'].lower() or 'hate' in tca_preds['label'].lower():
+                    tca_label = "Hostile Context Detected"
                     tca_probs[1] = tca_preds['score']
                 else:
+                    tca_label = "Safe Social Context"
                     tca_probs[0] = tca_preds['score']
                 del tca_pipe
                 self.clear_memory()
             except Exception as e:
                 print(f"TCA Error: {e}")
+                traceback.print_exc()
+                tca_label = "Analysis Not Available"
                 tca_probs = np.array([1.0, 0.0])
 
             # 7. Final Fusion (Dynamic Result Rendering)
@@ -196,6 +204,7 @@ class InferencePipeline:
                 "confidence": f"{float(max(tca_probs[1], ser_probs[1]) if final_class == 1 else max(tca_probs[0], ser_probs[0])) * 100:.2f}%",
                 "tca_confidence": f"{float(tca_probs[1] if final_class == 1 else tca_probs[0]) * 100:.2f}%",
                 "ser_confidence": f"{float(ser_probs[1] if final_class == 1 else ser_probs[0]) * 100:.2f}%",
+                "tca_label": tca_label,
                 "detected_emotion": detected_emotion,
                 "original_language": detected_lang
             }

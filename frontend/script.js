@@ -149,8 +149,9 @@ document.addEventListener('DOMContentLoaded', () => {
         processingState.classList.add('hidden');
         resultsSection.classList.remove('hidden');
 
-        // Update Text
+        // Results Logic
         document.getElementById('transcription-text').innerText = `"${data.transcription}"`;
+        document.getElementById('tca-text').innerText = `${data.tca_label || 'Analysis Complete'} (${data.tca_confidence})`;
         document.getElementById('emotion-text').innerText = data.detected_emotion;
         document.getElementById('confidence-text').innerText = data.confidence;
         

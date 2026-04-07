@@ -10,6 +10,8 @@ librosa==0.10.1
 noisereduce==3.0.2
 transformers==4.38.2
 torch==2.2.1
+tensorflow
+scipy
 soundfile==0.12.1
 setuptools==69.5.1
 wheel
