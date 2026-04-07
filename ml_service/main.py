@@ -60,10 +60,15 @@ class InferenceEngine:
         if self.ser_pipe is None:
             model_id = "MathRaaj/ser-fast-cnn-bilstm"
             try:
-                self.ser_pipe = pipeline("audio-classification", model=model_id, device=-1, trust_remote_code=True)
-            except Exception:
+                # Load specialized model manually to avoid pipeline auto-feature issues
+                config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
                 model = AutoModelForAudioClassification.from_pretrained(model_id, trust_remote_code=True)
-                self.ser_pipe = pipeline("audio-classification", model=model, device=-1)
+                model.eval()
+                self.ser_pipe = (model, config)
+                print(f"SER Model Loaded: {model_id}")
+            except Exception as e:
+                print(f"SER Load Critical Failure: {e}")
+                self.ser_pipe = None
         return self.ser_pipe
 
     def get_tca(self):
@@ -83,15 +88,63 @@ class InferenceEngine:
         text = "".join([s.text for s in segments]).strip()
         return text, info.language
 
+    def _extract_ser_features(self, audio, sr=16000, n_mels=128, n_frames=400):
+        """
+        Expert Feature Extraction: Generates 3-channel Neural Image [1, 3, 128, 400]
+        Channels: Mel-Spectrogram DB, Delta, Delta2
+        """
+        try:
+            # 1. Base Mel Spectrogram
+            mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels, hop_length=512)
+            mel_db = librosa.power_to_db(mel, ref=np.max)
+
+            # 2. Delta & Delta2 (Captures temporal dynamics)
+            delta = librosa.feature.delta(mel_db)
+            delta2 = librosa.feature.delta(mel_db, order=2)
+
+            # 3. Stack into 3 channels
+            features = np.stack([mel_db, delta, delta2], axis=0) # [3, 128, frames]
+
+            # 4. Padding / Truncating to exact target (400 frames)
+            if features.shape[2] < n_frames:
+                pad_width = n_frames - features.shape[2]
+                features = np.pad(features, ((0,0), (0,0), (0, pad_width)), mode='constant')
+            else:
+                features = features[:, :, :n_frames]
+
+            # 5. Normalize (Z-score for Neural Input)
+            mean = features.mean()
+            std = features.std()
+            if std > 0: features = (features - mean) / std
+
+            return torch.from_numpy(features).unsqueeze(0).float() # [1, 3, 128, 400]
+        except Exception:
+            return None
+
     def _run_ser(self, audio):
         try:
-            pipe = self.get_ser()
-            # FIX: Ensure audio is float32 for custom BiLSTM layers
-            input_audio = audio.astype(np.float32)
-            res = pipe({"array": input_audio, "sampling_rate": 16000})[0]
-            return res['label'].lower(), res['score']
+            ser_data = self.get_ser()
+            if not ser_data: return "Analysis Error", 0.0
+            
+            model, config = ser_data
+            
+            # Extract 3-channel features
+            input_tensor = self._extract_ser_features(audio)
+            if input_tensor is None: return "Analysis Error", 0.0
+
+            with torch.no_grad():
+                outputs = model(input_tensor)
+                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                score, idx = torch.max(probs, dim=-1)
+                
+                label_map = config.id2label if hasattr(config, 'id2label') else {
+                    0:"neutral", 1:"calm", 2:"happy", 3:"sad", 
+                    4:"angry", 5:"fearful", 6:"disgust", 7:"surprise"
+                }
+                label = label_map.get(idx.item(), "unknown").lower()
+                return label, score.item()
         except Exception as e:
-            print(f"SER Thread Error: {e}")
+            print(f"SER Neural Execution Error: {e}")
             return "Analysis Error", 0.0
 
     def analyze_source(self, url: str):

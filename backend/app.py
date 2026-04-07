@@ -19,21 +19,22 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 from sqlalchemy import text
 
-# Initialize DB tables with Auto-Migration for the Async Upgrade
+# Initialize DB tables with Auto-Migration for the Dashboard Restoration
 try:
-    # Check if the 'status' column exists (to detect outdated DB on Railway)
+    # Check if the latest feature columns exist (to detect outdated DB on Railway)
     with engine.connect() as conn:
-        conn.execute(text("SELECT status FROM video_records LIMIT 1"))
+        conn.execute(text("SELECT tca_confidence FROM video_records LIMIT 1"))
     print("Database schema is up-to-date.")
 except Exception:
-    print("Outdated/Empty Database detected. Initializing schema for Async Upgrade...")
+    print("Outdated Database detected. Forcing schema update for Dashboard Restoration...")
     try:
-        # If it fails, we drop and recreate to ensure the new columns (status, video_url) are added
+        # If it fails, we drop and recreate to ensure all columns (tca_confidence, etc) are added.
+        # USE CAUTION: This will reset the history on first deploy to the new version.
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
-        print("Database schema successfully recreated.")
+        print("Database schema successfully synchronized.")
     except Exception as e:
-        print(f"Database Reset Warning (Expected on first run): {e}")
+        print(f"Database Sync Warning: {e}")
 
 app = FastAPI(title="AudioGuard Orchestrator API")
 
