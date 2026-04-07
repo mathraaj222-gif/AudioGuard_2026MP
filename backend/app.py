@@ -13,11 +13,14 @@ from database import engine, get_db, SessionLocal, Base
 import models
 from models import VideoRecord
 
-# Environment variables for service communication
-ML_SERVICE_URL = os.getenv("ML_SERVICE_URL", "http://localhost:8080").rstrip("/")
-HF_TOKEN = os.getenv("HF_TOKEN")
-
 from sqlalchemy import text
+import asyncio
+import httpx
+
+# Microservices URLs (Set these in your Cloud Run Environment Variables)
+WHISPER_URL = os.getenv("WHISPER_URL", "http://localhost:8081").rstrip("/")
+SER_URL = os.getenv("SER_URL", "http://localhost:8082").rstrip("/")
+TCA_URL = os.getenv("TCA_URL", "http://localhost:8083").rstrip("/")
 
 # Initialize DB tables with Auto-Migration for the Dashboard Restoration
 try:
@@ -29,7 +32,6 @@ except Exception:
     print("Outdated Database detected. Forcing schema update for Dashboard Restoration...")
     try:
         # If it fails, we drop and recreate to ensure all columns (tca_confidence, etc) are added.
-        # USE CAUTION: This will reset the history on first deploy to the new version.
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         print("Database schema successfully synchronized.")
@@ -46,45 +48,97 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Background Task ---
-def perform_analysis_task(video_url: str, record_id: int):
-    """Heavy lifting AI task that runs in the background"""
+def to_audio_url(video_url: str) -> str:
+    """
+    Cloudinary Magic: Transforms a Video URL into an optimized 16kHz Mono WAV URL
+    Example: .../upload/v123/video.mp4 -> .../upload/f_wav,ac_1,ar_16000/v123/video.wav
+    """
+    # Simply replace the extension and inject the transformation parameters
+    if "/upload/" in video_url:
+        # Standardize extension to .wav and inject high-speed audio params
+        transformed = video_url.replace("/upload/", "/upload/f_wav,ac_1,ar_16000/")
+        # Ensure it ends with .wav for some older librosa versions
+        base, _ = os.path.splitext(transformed)
+        return base + ".wav"
+    return video_url
+
+# Fusion logic from monolith
+def fallback_fusion(tca_label, tca_conf, ser_emotion, ser_conf):
+    """Combines TCA and SER results into a final safety decision"""
+    is_hostile_tca = "hostile" in tca_label.lower()
+    is_hostile_ser = any(x in ser_emotion.lower() for x in ['angry', 'anger', 'disgust', 'fear'])
+    
+    # Priority 1: High confidence TCA detection
+    if is_hostile_tca and tca_conf > 0.7:
+        return True, f"{tca_conf * 100:.1f}%"
+    
+    # Priority 2: Agreement between models
+    if is_hostile_tca and is_hostile_ser:
+        return True, f"{max(tca_conf, ser_conf) * 100:.1f}%"
+        
+    # Default: Safe if not explicitly hostile
+    return False, f"{max(tca_conf, ser_conf) * 100:.1f}%"
+
+# --- Async Background Task ---
+async def perform_analysis_task(video_url: str, record_id: int):
+    """Master Orchestrator: Coordinates parallel tasks across AI services"""
     db = SessionLocal()
     try:
-        print(f"Bkg Task: Starting analysis for {video_url}...")
-        payload = {"video_url": video_url, "hf_token": HF_TOKEN}
-        resp = requests.post(f"{ML_SERVICE_URL}/process", json=payload, timeout=240)
+        print(f"Orchestration: Starting Distributed Analysis for Job {record_id}...")
+        audio_url = to_audio_url(video_url)
         
-        record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
-        if not record: return
-
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "failed":
-                record.status = "FAILED"
-                record.transcription = data.get("error_detail", "Unknown AI Error")
-                print(f"Bkg Task: AI Brain Failure: {record.transcription}")
-            else:
-                record.transcription = data.get("transcription")
-                record.translation_en = data.get("translation_en")
-                record.original_language = data.get("original_language")
-                record.detected_emotion = data.get("detected_emotion")
-                record.is_hatespeech = data.get("is_hatespeech")
-                record.confidence = data.get("confidence")
-                record.tca_confidence = data.get("tca_confidence")
-                record.ser_confidence = data.get("ser_confidence")
+        async with httpx.AsyncClient(timeout=300) as client:
+            # 1. Start Whisper and SER in Parallel
+            print(f" -> Dispatching Parallel Tracks (Whisper & SER)...")
+            whisper_future = client.post(f"{WHISPER_URL}/transcribe", json={"audio_url": audio_url})
+            ser_future = client.post(f"{SER_URL}/emotion", json={"audio_url": audio_url})
+            
+            whisper_resp, ser_resp = await asyncio.gather(whisper_future, ser_future)
+            
+            if whisper_resp.status_code != 200 or ser_resp.status_code != 200:
+                raise Exception(f"Phase 1 Failure: Whisper({whisper_resp.status_code}) SER({ser_resp.status_code})")
+            
+            w_data = whisper_resp.json()
+            s_data = ser_resp.json()
+            
+            # 2. Run TCA Sequential (Uses translation from Whisper)
+            print(f" -> Dispatching TCA Analysis...")
+            tca_resp = await client.post(f"{TCA_URL}/analyze", json={"text": w_data["translation_en"]})
+            
+            if tca_resp.status_code != 200:
+                raise Exception(f"Phase 2 Failure: TCA({tca_resp.status_code})")
+                
+            t_data = tca_resp.json()
+            
+            # 3. Perform Fusion
+            is_hatespeech, final_conf = fallback_fusion(
+                t_data["tca_label"], t_data["tca_confidence"],
+                s_data["detected_emotion"], s_data["ser_confidence"]
+            )
+            
+            # 4. Update Record
+            record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
+            if record:
+                record.transcription = w_data["transcription"]
+                record.translation_en = w_data["translation_en"]
+                record.original_language = w_data["original_language"]
+                record.detected_emotion = s_data["detected_emotion"]
+                record.ser_confidence = f"{s_data['ser_confidence'] * 100:.1f}%"
+                record.tca_label = t_data["tca_label"]
+                record.tca_confidence = f"{t_data['tca_confidence'] * 100:.1f}%"
+                record.is_hatespeech = is_hatespeech
+                record.confidence = final_conf
                 record.status = "COMPLETED"
-        else:
-            print(f"Bkg Task: ML Service Network Error: {resp.status_code} {resp.text}")
-            record.status = "FAILED"
-            record.transcription = f"Network Error ({resp.status_code})"
-        
-        db.commit()
+                db.commit()
+                print(f" ✅ Job {record_id} COMPLETED successfully.")
+
     except Exception as e:
-        print(f"Bkg Task: Failed: {e}")
+        print(f" ❌ Job {record_id} FAILED: {e}")
+        traceback.print_exc()
         record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
         if record:
             record.status = "FAILED"
+            record.transcription = f"Analysis Error: {str(e)}"
             db.commit()
     finally:
         db.close()
@@ -100,7 +154,7 @@ async def analyze_video(
     video_url: str = Form(...), 
     db: Session = Depends(get_db)
 ):
-    """Immediately returns 202 Accepted and starts AI in background"""
+    """Immediately returns 202 Accepted and starts distributed AI in background"""
     print(f"Orchestrator: Received Job for {video_url}")
     
     # 1. Create Initial Pending Record
@@ -113,7 +167,7 @@ async def analyze_video(
     db.commit()
     db.refresh(new_record)
 
-    # 2. Add to Background Tasks
+    # 2. Add to Background Tasks (Async function works natively)
     background_tasks.add_task(perform_analysis_task, video_url, new_record.id)
 
     return JSONResponse(status_code=202, content={

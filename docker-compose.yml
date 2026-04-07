@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # 1. Master Orchestrator
+  orchestrator:
+    build: 
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./test.db
+      - WHISPER_URL=http://whisper-svc:8080
+      - SER_URL=http://ser-svc:8080
+      - TCA_URL=http://tca-svc:8080
+    depends_on:
+      - whisper-svc
+      - ser-svc
+      - tca-svc
+
+  # 2. Transcription & Translation
+  whisper-svc:
+    build:
+      context: ./ml_services/whisper-svc
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 3. Emotion Recognition
+  ser-svc:
+    build:
+      context: ./ml_services/ser-svc
+    ports:
+      - "8082:8080"
+
+  # 4. Text Context Analysis
+  tca-svc:
+    build:
+      context: ./ml_services/tca-svc
+    ports:
+      - "8083:8080"

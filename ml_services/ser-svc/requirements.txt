@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+torch
+librosa
+numpy<2.0.0
+huggingface_hub
+requests
+noisereduce
+scipy
+soundfile

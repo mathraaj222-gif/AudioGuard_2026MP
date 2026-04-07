@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+faster-whisper
+transformers
+huggingface_hub
+torch
+requests
+python-multipart
+sentencepiece
+sacremoses
