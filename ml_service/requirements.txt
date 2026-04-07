@@ -10,6 +10,7 @@ librosa==0.10.1
 noisereduce==2.0.1
 transformers==4.36.0
 torch==2.2.1
+torchaudio
 tensorflow-cpu
 scipy
 soundfile==0.12.1
