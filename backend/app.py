@@ -55,9 +55,10 @@ def to_audio_url(video_url: str) -> str:
     """
     # Simply replace the extension and inject the transformation parameters
     if "/upload/" in video_url:
-        # Standardize extension to .wav and inject high-speed audio params
-        transformed = video_url.replace("/upload/", "/upload/f_wav,ach_1,ar_16000/")
-        # Ensure it ends with .wav for some older librosa versions
+        # Simplify transformation to just 'f_wav' to avoid Cloudinary 'Advanced Audio' 400 errors
+        # Your service layers (Whisper/SER) handle resampling to 16kHz mono automatically.
+        transformed = video_url.replace("/upload/", "/upload/f_wav/")
+        # Ensure it ends with .wav
         base, _ = os.path.splitext(transformed)
         return base + ".wav"
     return video_url
