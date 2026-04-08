@@ -1,70 +1,44 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class CNNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
         super().__init__()
         self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(True),
+            nn.MaxPool2d(2), nn.Dropout2d(0.2)
         )
-    def forward(self, x):
-        return self.block(x)
+    def forward(self, x): return self.block(x)
 
-class AttnPool(nn.Module):
-    def __init__(self, hidden_dim):
+class AttentionPool(nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=8, batch_first=True)
-        self.norm = nn.LayerNorm(hidden_dim)
-        
+        self.attn = nn.MultiheadAttention(dim, 4, batch_first=True)
+        self.norm = nn.LayerNorm(dim)
     def forward(self, x):
-        # x shape from LSTM: [batch, seq_len, hidden_dim * num_directions]
-        attn_out, _ = self.attn(x, x, x)
-        x = x + attn_out
-        x = self.norm(x)
-        # Global Average Pooling over temporal dimension
-        return x.mean(dim=1)
+        attn_out, weights = self.attn(x, x, x)
+        x = self.norm(x + attn_out)
+        w = weights.mean(dim=1, keepdim=True).transpose(1, 2)
+        return (x * w).sum(dim=1)
 
 class SERModel(nn.Module):
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
-        # CNN Front-end for local feature extraction
-        self.cnn = nn.Sequential(
-            CNNBlock(3, 32),   # cnn.0
-            CNNBlock(32, 64),  # cnn.1
-            CNNBlock(64, 128), # cnn.2
-            CNNBlock(128, 256) # cnn.3
-        )
-        
-        # BiLSTM for temporal context
-        # Input size: 256 channels * 8 height (assuming 128/16 input) = 2048
-        self.lstm = nn.LSTM(
-            input_size=2048, 
-            hidden_size=256, 
-            num_layers=2, 
-            batch_first=True, 
-            bidirectional=True
-        )
-        
-        # Attention Pooling to compress temporal sequence into a vector
-        self.attn_pool = AttnPool(512) # 256 * 2 (bidirectional)
-        
-        # Final Classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(512, 256),    # classifier.0
-            nn.BatchNorm1d(256),    # classifier.1
-            nn.ReLU(),
-            nn.Linear(256, 8)       # classifier.3
-        )
+        self.config = config or {}
+        h = self.config.get("LSTM_HIDDEN", 256)
+        self.cnn = nn.Sequential(ConvBlock(3, 32), ConvBlock(32, 64), ConvBlock(64, 128), ConvBlock(128, 256))
+        self.lstm = nn.LSTM(2048, h, 2, batch_first=True, bidirectional=True)
+        self.attn_pool = AttentionPool(h * 2)
+        self.classifier = nn.Sequential(nn.LayerNorm(h*2), nn.Linear(h*2, 256), nn.GELU(), nn.Linear(256, 7))
 
-    def forward(self, x):
-        # x: [Batch, 3, 128, 400]
-        x = self.cnn(x)             # [Batch, 256, 8, 25]
-        b, c, h, w = x.shape
-        # Permute and reshape for LSTM: [Batch, Width(Time), Channels * Height]
-        x = x.permute(0, 3, 1, 2).contiguous().view(b, w, c * h) # [B, 25, 2048]
-        x, _ = self.lstm(x)         # [Batch, 25, 512]
-        x = self.attn_pool(x)       # [Batch, 512]
-        return self.classifier(x)
+    def forward(self, features, labels=None):
+        x = self.cnn(features)
+        B, C, Freq, T = x.shape
+        x = x.permute(0, 3, 1, 2).reshape(B, T, C * Freq)
+        x, _ = self.lstm(x)
+        x = self.attn_pool(x)
+        logits = self.classifier(x)
+        loss = F.cross_entropy(logits, labels) if labels is not None else None
+        return {"loss": loss, "logits": logits}

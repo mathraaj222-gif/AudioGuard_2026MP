@@ -14,7 +14,7 @@ from model import SERModel
 class SEREngine:
     def __init__(self):
         print("SER-Svc: Loading Neural Models during startup...")
-        self.labels = ["neutral","calm","happy","sad","angry","fearful","disgust","surprise"]
+        self.labels = ["neutral","calm","happy","sad","angry","fearful","disgust"]
         model_dir = snapshot_download("MathRaaj/ser-fast-cnn-bilstm")
         weights_path = os.path.join(model_dir, "pytorch_model.bin")
         
@@ -41,9 +41,10 @@ class SEREngine:
             else:
                 features = features[:, :, :n_frames]
             
-            mean = features.mean()
-            std = features.std()
-            if std > 0: features = (features - mean) / std
+            for c in range(3):
+                feat_mean = features[c].mean()
+                feat_std = features[c].std()
+                features[c] = (features[c] - feat_mean) / (feat_std + 1e-9)
             
             return torch.tensor(features).unsqueeze(0).float()
         except Exception:
@@ -67,7 +68,8 @@ class SEREngine:
                 raise ValueError("Feature extraction failed")
             
             with torch.no_grad():
-                logits = self.model(features)
+                out = self.model(features)
+                logits = out["logits"]
                 probs = torch.softmax(logits, dim=-1)
             
             score, idx = torch.max(probs, dim=-1)
