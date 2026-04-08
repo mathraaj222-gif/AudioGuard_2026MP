@@ -56,7 +56,7 @@ def to_audio_url(video_url: str) -> str:
     # Simply replace the extension and inject the transformation parameters
     if "/upload/" in video_url:
         # Standardize extension to .wav and inject high-speed audio params
-        transformed = video_url.replace("/upload/", "/upload/f_wav,ac_1,ar_16000/")
+        transformed = video_url.replace("/upload/", "/upload/f_wav,ach_1,ar_16000/")
         # Ensure it ends with .wav for some older librosa versions
         base, _ = os.path.splitext(transformed)
         return base + ".wav"

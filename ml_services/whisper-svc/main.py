@@ -26,6 +26,9 @@ class InferenceEngine:
             
             # 1. Download from Cloudinary URL
             resp = requests.get(audio_url)
+            if resp.status_code != 200:
+                raise Exception(f"Failed to download audio from Cloudinary: {resp.status_code} - {resp.text[:200]}")
+            
             with open(audio_path, "wb") as f:
                 f.write(resp.content)
 

@@ -53,6 +53,9 @@ class SEREngine:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "audio.wav")
             resp = requests.get(audio_url)
+            if resp.status_code != 200:
+                raise Exception(f"Failed to download audio from Cloudinary: {resp.status_code} - {resp.text[:200]}")
+                
             with open(path, "wb") as f:
                 f.write(resp.content)
             
