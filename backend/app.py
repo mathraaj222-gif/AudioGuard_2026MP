@@ -96,7 +96,9 @@ async def perform_analysis_task(video_url: str, record_id: int):
             whisper_resp, ser_resp = await asyncio.gather(whisper_future, ser_future)
             
             if whisper_resp.status_code != 200 or ser_resp.status_code != 200:
-                raise Exception(f"Phase 1 Failure: Whisper({whisper_resp.status_code}) SER({ser_resp.status_code})")
+                w_err = whisper_resp.text if whisper_resp.status_code != 200 else "OK"
+                s_err = ser_resp.text if ser_resp.status_code != 200 else "OK"
+                raise Exception(f"Phase 1 Failure: Whisper({whisper_resp.status_code}: {w_err}) SER({ser_resp.status_code}: {s_err})")
             
             w_data = whisper_resp.json()
             s_data = ser_resp.json()
@@ -106,7 +108,8 @@ async def perform_analysis_task(video_url: str, record_id: int):
             tca_resp = await client.post(f"{TCA_URL}/analyze", json={"text": w_data["translation_en"]})
             
             if tca_resp.status_code != 200:
-                raise Exception(f"Phase 2 Failure: TCA({tca_resp.status_code})")
+                t_err = tca_resp.text
+                raise Exception(f"Phase 2 Failure: TCA({tca_resp.status_code}: {t_err})")
                 
             t_data = tca_resp.json()
             

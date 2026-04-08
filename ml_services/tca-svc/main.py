@@ -5,20 +5,16 @@ from transformers import pipeline
 
 class TCAEngine:
     def __init__(self):
-        self.pipe = None
-
-    def load_model(self):
-        if self.pipe is None:
-            model_id = "MathRaaj/T1_bert_nli_2"
-            self.pipe = pipeline("text-classification", model=model_id, device=-1)
-        return self.pipe
+        print("TCA-Svc: Loading BERT Model during startup...")
+        model_id = "MathRaaj/T1_bert_nli_2"
+        self.pipe = pipeline("text-classification", model=model_id, device=-1)
+        print("TCA-Svc: Model Loaded Successfully!")
 
     def process(self, text: str):
         if not text:
             return {"tca_label": "Safe Social Context", "tca_confidence": 1.0}
         
-        pipe = self.load_model()
-        res = pipe(text)[0]
+        res = self.pipe(text)[0]
         label = res['label'].lower()
         score = res['score']
         
@@ -34,7 +30,12 @@ class TCAEngine:
         }
 
 app = FastAPI(title="AudioGuard TCA-Svc")
-engine = TCAEngine()
+engine = None
+
+@app.on_event("startup")
+async def startup_event():
+    global engine
+    engine = TCAEngine()
 
 class TextRequest(BaseModel):
     text: str

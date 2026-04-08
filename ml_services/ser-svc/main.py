@@ -13,22 +13,18 @@ from model import SERModel
 
 class SEREngine:
     def __init__(self):
-        self.model = None
+        print("SER-Svc: Loading Neural Models during startup...")
         self.labels = ["neutral","calm","happy","sad","angry","fearful","disgust","surprise"]
-
-    def load_model(self):
-        if self.model is None:
-            model_dir = snapshot_download("MathRaaj/ser-fast-cnn-bilstm")
-            weights_path = os.path.join(model_dir, "pytorch_model.bin")
-            
-            model = SERModel()
-            state_dict = torch.load(weights_path, map_location="cpu")
-            # Remove module. prefix if present from DataParallel
-            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-            model.load_state_dict(state_dict)
-            model.eval()
-            self.model = model
-        return self.model
+        model_dir = snapshot_download("MathRaaj/ser-fast-cnn-bilstm")
+        weights_path = os.path.join(model_dir, "pytorch_model.bin")
+        
+        self.model = SERModel()
+        state_dict = torch.load(weights_path, map_location="cpu")
+        # Remove module. prefix if present from DataParallel
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
+        print("SER-Svc: Models Loaded Successfully!")
 
     def extract_features(self, audio, sr=16000, n_mels=128, n_frames=400):
         try:
@@ -67,9 +63,8 @@ class SEREngine:
             if features is None:
                 raise ValueError("Feature extraction failed")
             
-            model = self.load_model()
             with torch.no_grad():
-                logits = model(features)
+                logits = self.model(features)
                 probs = torch.softmax(logits, dim=-1)
             
             score, idx = torch.max(probs, dim=-1)
@@ -81,7 +76,12 @@ class SEREngine:
             }
 
 app = FastAPI(title="AudioGuard SER-Svc")
-engine = SEREngine()
+engine = None
+
+@app.on_event("startup")
+async def startup_event():
+    global engine
+    engine = SEREngine()
 
 class EmotionRequest(BaseModel):
     audio_url: str
@@ -89,6 +89,8 @@ class EmotionRequest(BaseModel):
 @app.post("/emotion")
 def get_emotion(req: EmotionRequest):
     try:
+        if engine is None:
+            raise Exception("SER Engine not initialized")
         return engine.process(req.audio_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -14,19 +14,11 @@ torch.set_num_threads(1)
 
 class InferenceEngine:
     def __init__(self):
-        self.whisper = None
-        self.translator = None
-
-    def load_whisper(self):
-        if self.whisper is None:
-            path = snapshot_download("Systran/faster-whisper-small")
-            self.whisper = WhisperModel(path, device="cpu", compute_type="int8")
-        return self.whisper
-
-    def load_translator(self):
-        if self.translator is None:
-            self.translator = pipeline("translation", model="Helsinki-NLP/opus-mt-mul-en", device=-1)
-        return self.translator
+        print("Whisper-Svc: Loading Models during startup...")
+        path = snapshot_download("Systran/faster-whisper-small")
+        self.whisper = WhisperModel(path, device="cpu", compute_type="int8")
+        self.translator = pipeline("translation", model="Helsinki-NLP/opus-mt-mul-en", device=-1)
+        print("Whisper-Svc: Models Loaded Successfully!")
 
     def process(self, audio_url: str):
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,14 +30,12 @@ class InferenceEngine:
                 f.write(resp.content)
 
             # 2. Transcribe
-            model = self.load_whisper()
-            segments, info = model.transcribe(audio_path)
+            segments, info = self.whisper.transcribe(audio_path)
             text = "".join([s.text for s in segments]).strip()
 
             # 3. Translate if not English
             if info.language != "en" and text:
-                translator = self.load_translator()
-                english_text = translator(text)[0]['translation_text']
+                english_text = self.translator(text)[0]['translation_text']
             else:
                 english_text = text
 
@@ -57,7 +47,12 @@ class InferenceEngine:
             }
 
 app = FastAPI(title="AudioGuard Whisper-Svc")
-engine = InferenceEngine()
+engine = None
+
+@app.on_event("startup")
+async def startup_event():
+    global engine
+    engine = InferenceEngine()
 
 class AudioRequest(BaseModel):
     audio_url: str
@@ -65,6 +60,8 @@ class AudioRequest(BaseModel):
 @app.post("/transcribe")
 def transcribe(req: AudioRequest):
     try:
+        if engine is None:
+            raise Exception("Inference Engine not initialized")
         return engine.process(req.audio_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
