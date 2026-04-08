@@ -33,9 +33,12 @@ class InferenceEngine:
             audio_path = os.path.join(tmp, "audio.wav")
             
             # 1. Download from Cloudinary URL
-            resp = requests.get(audio_url)
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AudioGuard/1.0"}
+            resp = requests.get(audio_url, headers=headers, timeout=30)
             if resp.status_code != 200:
-                raise Exception(f"Failed to download audio from Cloudinary: {resp.status_code} - {resp.text[:200]}")
+                err_msg = f"Failed to download audio. Status: {resp.status_code}, URL: {audio_url}"
+                print(f"Whisper-Svc Error: {err_msg}")
+                raise Exception(err_msg)
             
             with open(audio_path, "wb") as f:
                 f.write(resp.content)

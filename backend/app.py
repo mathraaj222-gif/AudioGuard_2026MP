@@ -50,17 +50,11 @@ app.add_middleware(
 
 def to_audio_url(video_url: str) -> str:
     """
-    Cloudinary Magic: Transforms a Video URL into an optimized 16kHz Mono WAV URL
-    Example: .../upload/v123/video.mp4 -> .../upload/f_wav,ac_1,ar_16000/v123/video.wav
+    Cloudinary Transformation Bypass:
+    Returning original URL to avoid 400 errors caused by 'Strict Transformations' 
+    or Tier-restrictions on dynamic resampling (f_wav, ar_16000).
+    The AI services (Whisper/SER) handle auto-resampling with ffmpeg/librosa natively.
     """
-    # Simply replace the extension and inject the transformation parameters
-    if "/upload/" in video_url:
-        # Simplify transformation to just 'f_wav' to avoid Cloudinary 'Advanced Audio' 400 errors
-        # Your service layers (Whisper/SER) handle resampling to 16kHz mono automatically.
-        transformed = video_url.replace("/upload/", "/upload/f_wav/")
-        # Ensure it ends with .wav
-        base, _ = os.path.splitext(transformed)
-        return base + ".wav"
     return video_url
 
 # Fusion logic from monolith
