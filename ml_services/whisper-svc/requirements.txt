@@ -8,3 +8,4 @@ requests
 python-multipart
 sentencepiece
 sacremoses
+protobuf
