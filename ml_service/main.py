@@ -7,245 +7,234 @@ import librosa
 import noisereduce as nr
 import gc
 import traceback
-import concurrent.futures
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI
 from pydantic import BaseModel
 from moviepy.editor import VideoFileClip
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForAudioClassification, AutoModelForSequenceClassification, AutoConfig
-from faster_whisper import WhisperModel
-from huggingface_hub import login, snapshot_download
 
-# --- PRODUCTION CONFIG: 4GB RAM CPU ---
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from faster_whisper import WhisperModel
+from huggingface_hub import snapshot_download
+
+# ------------------ CONFIG ------------------
 torch.set_num_threads(1)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-# --- Fusion Logic ---
-def fallback_fusion(tca_probs, ser_probs, tca_threshold=0.75):
-    tca_max = np.max(tca_probs)
-    if tca_max >= tca_threshold:
-        return np.argmax(tca_probs), tca_probs
-    else:
-        return np.argmax(ser_probs), ser_probs
+# ------------------ CUSTOM SER MODEL ------------------
+import torch.nn as nn
 
+class SERModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+
+        self.lstm = nn.LSTM(
+            input_size=32 * 32,
+            hidden_size=128,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True
+        )
+
+        self.fc = nn.Linear(256, 8)
+
+    def forward(self, x):
+        x = self.conv(x)                     # [B, 32, H, W]
+        b, c, h, w = x.shape
+        x = x.view(b, w, c * h)             # [B, T, Features]
+        x, _ = self.lstm(x)
+        x = x[:, -1, :]
+        return self.fc(x)
+
+# ------------------ ENGINE ------------------
 class InferenceEngine:
     def __init__(self):
-        self.device = "cpu"
-        self.hf_token = os.getenv("HF_TOKEN")
         self.whisper = None
         self.translator = None
-        self.ser_pipe = None
-        self.tca_pipe = None
-        
-        if self.hf_token:
-            try: login(token=self.hf_token)
-            except Exception: pass
+        self.tca = None
+        self.ser_model = None
 
     def clear_memory(self):
         gc.collect()
-        if torch.cuda.is_available(): torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    def get_whisper(self):
+    # ---------- LOAD MODELS ----------
+    def load_whisper(self):
         if self.whisper is None:
-            path = snapshot_download(repo_id="Systran/faster-whisper-small")
+            path = snapshot_download("Systran/faster-whisper-small")
             self.whisper = WhisperModel(path, device="cpu", compute_type="int8")
         return self.whisper
 
-    def get_translator(self):
+    def load_translator(self):
         if self.translator is None:
-            self.translator = pipeline("translation", model="Helsinki-NLP/opus-mt-mul-en", device=-1)
+            self.translator = pipeline(
+                "translation",
+                model="Helsinki-NLP/opus-mt-mul-en",
+                device=-1
+            )
         return self.translator
 
-    def get_ser(self):
-        if self.ser_pipe is None:
-            model_id = "MathRaaj/ser-fast-cnn-bilstm"
-            try:
-                # Load specialized model manually to avoid pipeline auto-feature issues
-                config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-                model = AutoModelForAudioClassification.from_pretrained(model_id, trust_remote_code=True)
-                model.eval()
-                self.ser_pipe = (model, config)
-                print(f"SER Model Loaded: {model_id}")
-            except Exception as e:
-                print(f"SER Load Critical Failure: {e}")
-                self.ser_pipe = None
-        return self.ser_pipe
-
-    def get_tca(self):
-        if self.tca_pipe is None:
+    def load_tca(self):
+        if self.tca is None:
             model_id = "MathRaaj/T1_bert_nli_2"
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForSequenceClassification.from_pretrained(model_id)
+            self.tca = pipeline("text-classification", model=model, tokenizer=tokenizer)
+        return self.tca
+
+    def load_ser(self):
+        if self.ser_model is None:
             try:
-                self.tca_pipe = pipeline("text-classification", model=model_id, device=-1, trust_remote_code=True)
-            except Exception:
-                tok = AutoTokenizer.from_pretrained(model_id)
-                model = AutoModelForSequenceClassification.from_pretrained(model_id, trust_remote_code=True)
-                self.tca_pipe = pipeline("text-classification", model=model, tokenizer=tok, device=-1)
-        return self.tca_pipe
+                model_dir = snapshot_download("MathRaaj/ser-fast-cnn-bilstm")
+                weights_path = os.path.join(model_dir, "pytorch_model.bin")
 
-    def _run_whisper(self, audio):
-        model = self.get_whisper()
-        segments, info = model.transcribe(audio, beam_size=5)
-        text = "".join([s.text for s in segments]).strip()
-        return text, info.language
+                model = SERModel()
+                state_dict = torch.load(weights_path, map_location="cpu")
 
-    def _extract_ser_features(self, audio, sr=16000, n_mels=128, n_frames=400):
-        """
-        Expert Feature Extraction: Generates 3-channel Neural Image [1, 3, 128, 400]
-        Channels: Mel-Spectrogram DB, Delta, Delta2
-        """
+                # Fix DataParallel issue
+                state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+                model.load_state_dict(state_dict)
+                model.eval()
+
+                self.ser_model = model
+                print("✅ SER MODEL LOADED")
+            except Exception as e:
+                print(f"❌ SER LOAD ERROR: {e}")
+                self.ser_model = None
+
+        return self.ser_model
+
+    # ---------- FEATURE EXTRACTION ----------
+    def extract_features(self, audio, sr=16000, n_mels=128, n_frames=400):
         try:
-            # 1. Base Mel Spectrogram
-            mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels, hop_length=512)
+            mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels)
             mel_db = librosa.power_to_db(mel, ref=np.max)
 
-            # 2. Delta & Delta2 (Captures temporal dynamics)
             delta = librosa.feature.delta(mel_db)
             delta2 = librosa.feature.delta(mel_db, order=2)
 
-            # 3. Stack into 3 channels
-            features = np.stack([mel_db, delta, delta2], axis=0) # [3, 128, frames]
+            features = np.stack([mel_db, delta, delta2], axis=0)
 
-            # 4. Padding / Truncating to exact target (400 frames)
             if features.shape[2] < n_frames:
-                pad_width = n_frames - features.shape[2]
-                features = np.pad(features, ((0,0), (0,0), (0, pad_width)), mode='constant')
+                pad = n_frames - features.shape[2]
+                features = np.pad(features, ((0,0),(0,0),(0,pad)))
             else:
                 features = features[:, :, :n_frames]
 
-            # 5. Normalize (Z-score for Neural Input)
             mean = features.mean()
             std = features.std()
-            if std > 0: features = (features - mean) / std
+            if std > 0:
+                features = (features - mean) / std
 
-            return torch.from_numpy(features).unsqueeze(0).float() # [1, 3, 128, 400]
-        except Exception:
+            return torch.tensor(features).unsqueeze(0).float()
+        except Exception as e:
+            print(f"Feature error: {e}")
             return None
 
-    def _run_ser(self, audio):
-        try:
-            ser_data = self.get_ser()
-            if not ser_data: return "Analysis Error", 0.0
-            
-            model, config = ser_data
-            
-            # Extract 3-channel features
-            input_tensor = self._extract_ser_features(audio)
-            if input_tensor is None: return "Analysis Error", 0.0
+    # ---------- SER ----------
+    def run_ser(self, audio):
+        model = self.load_ser()
+        if model is None:
+            return "error", 0.0
 
-            with torch.no_grad():
-                outputs = model(input_tensor)
-                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                score, idx = torch.max(probs, dim=-1)
-                
-                label_map = config.id2label if hasattr(config, 'id2label') else {
-                    0:"neutral", 1:"calm", 2:"happy", 3:"sad", 
-                    4:"angry", 5:"fearful", 6:"disgust", 7:"surprise"
-                }
-                label = label_map.get(idx.item(), "unknown").lower()
-                return label, score.item()
-        except Exception as e:
-            print(f"SER Neural Execution Error: {e}")
-            return "Analysis Error", 0.0
+        features = self.extract_features(audio)
+        if features is None:
+            return "error", 0.0
 
-    def analyze_source(self, url: str):
-        is_audio = any(url.lower().endswith(ext) for ext in ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg'])
-        
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            source_path = os.path.join(tmp_dir, "input")
-            audio_path = os.path.join(tmp_dir, "clean.wav")
+        with torch.no_grad():
+            logits = model(features)
+            probs = torch.softmax(logits, dim=-1)
 
-            # 1. DOWNLOAD
-            with requests.get(url, stream=True) as r:
-                r.raise_for_status()
-                with open(source_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+        score, idx = torch.max(probs, dim=-1)
 
-            # 2. AUDIO EXTRACTION
-            if is_audio: audio_entry = source_path
+        labels = ["neutral","calm","happy","sad","angry","fearful","disgust","surprise"]
+        return labels[idx.item()], score.item()
+
+    # ---------- WHISPER ----------
+    def run_whisper(self, audio):
+        model = self.load_whisper()
+        segments, info = model.transcribe(audio)
+        text = "".join([s.text for s in segments]).strip()
+        return text, info.language
+
+    # ---------- MAIN PIPELINE ----------
+    def analyze(self, url):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = os.path.join(tmp, "input")
+
+            # Download
+            r = requests.get(url)
+            with open(file_path, "wb") as f:
+                f.write(r.content)
+
+            # Extract audio
+            if file_path.endswith((".mp4",".mov",".avi")):
+                video = VideoFileClip(file_path)
+                audio_path = os.path.join(tmp, "audio.wav")
+                video.audio.write_audiofile(audio_path, logger=None)
+                video.close()
             else:
-                try:
-                    video = VideoFileClip(source_path)
-                    video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-                    video.close()
-                    audio_entry = audio_path
-                except Exception: audio_entry = source_path
+                audio_path = file_path
 
-            y, sr = librosa.load(audio_entry, sr=16000)
-            clean_y = nr.reduce_noise(y=y, sr=sr, stationary=True)
-            self.clear_memory()
+            # Load audio
+            y, sr = librosa.load(audio_path, sr=16000)
 
-            # 3. PARALLEL EXECUTION (Whisper + SER)
-            print("Action: Starting Parallel Track (Whisper & SER)...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                future_whisper = executor.submit(self._run_whisper, clean_y)
-                future_ser = executor.submit(self._run_ser, clean_y)
-                
-                transcription, detected_lang = future_whisper.result()
-                emotion, ser_score = future_ser.result()
+            # Noise reduction
+            y = nr.reduce_noise(y=y, sr=sr)
 
-            self.clear_memory()
+            # -------- SEQUENTIAL (SAFE) --------
+            text, lang = self.run_whisper(y)
+            emotion, ser_score = self.run_ser(y)
 
-            # 4. TRANSLATION & TCA (Sequential because they depend on text)
-            if detected_lang == "en" or not transcription:
-                english_text = transcription
+            # Translation
+            if lang != "en" and text:
+                translator = self.load_translator()
+                text_en = translator(text)[0]['translation_text']
             else:
-                try:
-                    translator = self.get_translator()
-                    res = translator(transcription, max_length=512)
-                    english_text = res[0]['translation_text']
-                except Exception: english_text = transcription
-            
-            # TCA Processing
-            try:
-                tca = self.get_tca()
-                tca_res = tca(english_text)[0]
-                t_score = tca_res['score']
-                t_label = tca_res['label'].lower()
-                
-                tca_probs = np.zeros(2)
-                if 'label_1' in t_label or 'hate' in t_label:
-                    tca_label = "Hostile Context Detected"
-                    tca_probs[1] = t_score; tca_probs[0] = 1 - t_score
-                else:
-                    tca_label = "Safe Social Context"
-                    tca_probs[0] = t_score; tca_probs[1] = 1 - t_score
-            except Exception:
-                tca_label = "Analysis Not Available"
-                tca_probs = np.array([1.0, 0.0])
+                text_en = text
 
-            # SER Probability Mapping
-            ser_probs = np.zeros(2)
-            if any(x in emotion for x in ['angry', 'anger', 'disgust', 'fear']):
-                ser_probs[1] = ser_score; ser_probs[0] = 1 - ser_score
-            else:
-                ser_probs[0] = ser_score; ser_probs[1] = 1 - ser_score
+            # TCA
+            tca = self.load_tca()
+            tca_res = tca(text_en)[0]
 
-            # 5. FINAL FUSION
-            final_class, _ = fallback_fusion(tca_probs, ser_probs)
-            
-            # FIX: Restore all keys for Dashboard (tca_confidence, ser_confidence, lang, translation)
+            is_hate = "1" in tca_res["label"]
+
             return {
-                "transcription": transcription,
-                "translation_en": english_text,
-                "original_language": detected_lang,
-                "is_hatespeech": bool(final_class == 1),
-                "confidence": f"{float(max(tca_probs[final_class], ser_probs[final_class])) * 100:.2f}%",
-                "tca_label": tca_label,
-                "tca_confidence": f"{float(tca_probs[1] if final_class == 1 else tca_probs[0]) * 100:.2f}%",
-                "ser_confidence": f"{float(ser_probs[1] if final_class == 1 else ser_probs[0]) * 100:.2f}%",
-                "detected_emotion": emotion
+                "transcription": text,
+                "translation": text_en,
+                "language": lang,
+                "emotion": emotion,
+                "ser_score": ser_score,
+                "is_hatespeech": is_hate,
+                "confidence": tca_res["score"]
             }
 
+# ------------------ FASTAPI ------------------
 app = FastAPI()
 engine = InferenceEngine()
 
-class RequestModel(BaseModel):
-    video_url: str
-    hf_token: str = None
+@app.on_event("startup")
+def startup():
+    engine.load_ser()
+
+class Request(BaseModel):
+    url: str
 
 @app.post("/process")
-async def process(request: RequestModel):
-    try: return engine.analyze_source(request.video_url)
+def process(req: Request):
+    try:
+        return engine.analyze(req.url)
     except Exception as e:
         traceback.print_exc()
-        return {"status": "failed", "error_detail": str(e)}
+        return {"error": str(e)}

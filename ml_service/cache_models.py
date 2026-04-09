@@ -31,10 +31,10 @@ def cache_all_models():
     ser_id = "MathRaaj/ser-fast-cnn-bilstm"
     snapshot_download(repo_id=ser_id) # Captures all weight formats
 
-    # 4. TCA (Text Context Analysis - T1_bert_nli_2)
+    # 4. TCA (Text Context Analysis - T1_bert_nli_3)
     # Safetensors support is handled automatically by snapshot_download
-    print("Caching MathRaaj/T1_bert_nli_2...")
-    tca_id = "MathRaaj/T1_bert_nli_2"
+    print("Caching MathRaaj/T1_bert_nli_3...")
+    tca_id = "MathRaaj/T1_bert_nli_3"
     snapshot_download(repo_id=tca_id)
 
     print("--- ALL MODELS BAKED SUCCESSFULLY (SAFETENSORS SUPPORTED) ---")

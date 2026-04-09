@@ -6,7 +6,7 @@ from transformers import pipeline
 class TCAEngine:
     def __init__(self):
         print("TCA-Svc: Loading BERT Model during startup...")
-        model_id = "MathRaaj/T1_bert_nli_2"
+        model_id = "MathRaaj/T1_bert_nli_3"
         self.pipe = pipeline("text-classification", model=model_id, device=-1)
         print("TCA-Svc: Model Loaded Successfully!")
 

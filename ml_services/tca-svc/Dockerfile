@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-cache TCA model
-RUN python -c "from transformers import pipeline; pipeline('text-classification', model='MathRaaj/T1_bert_nli_2')"
+RUN python -c "from transformers import pipeline; pipeline('text-classification', model='MathRaaj/T1_bert_nli_3')"
 
 COPY . .
 
