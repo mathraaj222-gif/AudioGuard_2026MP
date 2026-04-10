@@ -12,10 +12,12 @@ services:
       - WHISPER_URL=http://whisper-svc:8080
       - SER_URL=http://ser-svc:8080
       - TCA_URL=http://tca-svc:8080
+      - META_URL=http://meta-svc:8080
     depends_on:
       - whisper-svc
       - ser-svc
       - tca-svc
+      - meta-svc
 
   # 2. Transcription & Translation
   whisper-svc:
@@ -42,3 +44,12 @@ services:
       context: ./ml_services/tca-svc
     ports:
       - "8083:8080"
+
+  # 5. Meta-Classifier (Fusion)
+  meta-svc:
+    build:
+      context: ./ml_services/meta-svc
+    ports:
+      - "8084:8080"
+    environment:
+      - HATE_THRESHOLD=0.35

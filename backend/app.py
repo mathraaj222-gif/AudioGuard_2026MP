@@ -21,6 +21,7 @@ import httpx
 WHISPER_URL = os.getenv("WHISPER_URL", "http://localhost:8081").rstrip("/")
 SER_URL = os.getenv("SER_URL", "http://localhost:8082").rstrip("/")
 TCA_URL = os.getenv("TCA_URL", "http://localhost:8083").rstrip("/")
+META_URL = os.getenv("META_URL", "http://localhost:8084").rstrip("/")
 
 # Initialize DB tables with Auto-Migration for the Dashboard Restoration
 try:
@@ -51,40 +52,24 @@ app.add_middleware(
 def to_audio_url(video_url: str) -> str:
     """
     Cloudinary Transformation Bypass:
-    Returning original URL to avoid 400 errors caused by 'Strict Transformations' 
-    or Tier-restrictions on dynamic resampling (f_wav, ar_16000).
     The AI services (Whisper/SER) handle auto-resampling with ffmpeg/librosa natively.
     """
     return video_url
 
-# Fusion logic from monolith
-def fallback_fusion(tca_label, tca_conf, ser_emotion, ser_conf):
-    """Combines TCA and SER results into a final safety decision"""
-    is_hostile_tca = "hostile" in tca_label.lower()
-    is_hostile_ser = any(x in ser_emotion.lower() for x in ['angry', 'anger', 'disgust', 'fear'])
-    
-    # Priority 1: High confidence TCA detection
-    if is_hostile_tca and tca_conf > 0.7:
-        return True, f"{tca_conf * 100:.1f}%"
-    
-    # Priority 2: Agreement between models
-    if is_hostile_tca and is_hostile_ser:
-        return True, f"{max(tca_conf, ser_conf) * 100:.1f}%"
-        
-    # Default: Safe if not explicitly hostile
-    return False, f"{max(tca_conf, ser_conf) * 100:.1f}%"
-
 # --- Async Background Task ---
 async def perform_analysis_task(video_url: str, record_id: int):
-    """Master Orchestrator: Coordinates parallel tasks across AI services"""
+    """
+    Master Orchestrator: 
+    Coordinates Parallel Extraction -> Concatenation -> Meta-Classification
+    """
     db = SessionLocal()
     try:
-        print(f"Orchestration: Starting Distributed Analysis for Job {record_id}...")
+        print(f"Orchestration: Starting Multi-Modal Analysis for Job {record_id}...")
         audio_url = to_audio_url(video_url)
         
         async with httpx.AsyncClient(timeout=300) as client:
-            # 1. Start Whisper and SER in Parallel
-            print(f" -> Dispatching Parallel Tracks (Whisper & SER)...")
+            # 1. Phase 1: Parallel Extraction (Whisper & SER)
+            print(f" -> Phase 1: Dispatching Parallel Tracks (Whisper & SER)...")
             whisper_future = client.post(f"{WHISPER_URL}/transcribe", json={"audio_url": audio_url})
             ser_future = client.post(f"{SER_URL}/emotion", json={"audio_url": audio_url})
             
@@ -93,42 +78,72 @@ async def perform_analysis_task(video_url: str, record_id: int):
             if whisper_resp.status_code != 200 or ser_resp.status_code != 200:
                 w_err = whisper_resp.text if whisper_resp.status_code != 200 else "OK"
                 s_err = ser_resp.text if ser_resp.status_code != 200 else "OK"
-                raise Exception(f"Phase 1 Failure: Whisper({whisper_resp.status_code}: {w_err}) SER({ser_resp.status_code}: {s_err})")
+                raise Exception(f"Phase 1 Failure: Whisper({whisper_resp.status_code}) SER({ser_resp.status_code})")
             
             w_data = whisper_resp.json()
             s_data = ser_resp.json()
             
-            # 2. Run TCA Sequential (Uses translation from Whisper)
-            print(f" -> Dispatching TCA Analysis...")
+            # 2. Phase 2: Sequential Linguistic Analysis (TCA)
+            print(f" -> Phase 2: Dispatching TCA Analysis...")
             tca_resp = await client.post(f"{TCA_URL}/analyze", json={"text": w_data["translation_en"]})
             
             if tca_resp.status_code != 200:
-                t_err = tca_resp.text
-                raise Exception(f"Phase 2 Failure: TCA({tca_resp.status_code}: {t_err})")
+                raise Exception(f"Phase 2 Failure: TCA({tca_resp.status_code})")
                 
             t_data = tca_resp.json()
             
-            # 3. Perform Fusion
-            is_hatespeech, final_conf = fallback_fusion(
-                t_data["tca_label"], t_data["tca_confidence"],
-                s_data["detected_emotion"], s_data["ser_confidence"]
-            )
+            # 3. Phase 3: Meta-Classification (Fusion)
+            print(f" -> Phase 3: Fusion via Meta-Classifier...")
             
-            # 4. Update Record
+            # Glue embeddings together (768 + 768 = 1536)
+            ser_emb = s_data.get("embedding", [])
+            tca_emb = t_data.get("embedding", [])
+            
+            if len(ser_emb) != 768 or len(tca_emb) != 768:
+                raise Exception(f"Dimensionality Error: SER({len(ser_emb)}) TCA({len(tca_emb)}). Expected 768 each.")
+            
+            combined_vector = ser_emb + tca_emb
+            
+            meta_resp = await client.post(f"{META_URL}/predict", json={"embedding": combined_vector})
+            
+            if meta_resp.status_code != 200:
+                raise Exception(f"Phase 3 Failure: Meta-Svc({meta_resp.status_code})")
+            
+            m_data = meta_resp.json()
+
+            # 4. Final Updates
             record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
             if record:
                 record.transcription = w_data["transcription"]
                 record.translation_en = w_data["translation_en"]
                 record.original_language = w_data["original_language"]
+                
+                # Model Results
                 record.detected_emotion = s_data["detected_emotion"]
                 record.ser_confidence = f"{s_data['ser_confidence'] * 100:.1f}%"
+                
                 record.tca_label = t_data["tca_label"]
                 record.tca_confidence = f"{t_data['tca_confidence'] * 100:.1f}%"
-                record.is_hatespeech = is_hatespeech
-                record.confidence = final_conf
+                
+                # Final Meta Decision
+                record.is_hatespeech = m_data["is_hateful"]
+                record.confidence = f"{m_data['confidence_score'] * 100:.1f}%"
+                
                 record.status = "COMPLETED"
                 db.commit()
-                print(f" ✅ Job {record_id} COMPLETED successfully.")
+                print(f" ✅ Job {record_id} COMPLETED: {m_data['label']} detected.")
+
+    except Exception as e:
+        print(f" ❌ Job {record_id} FAILED: {e}")
+        traceback.print_exc()
+        record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
+        if record:
+            record.status = "FAILED"
+            record.transcription = f"Orchestration Error: {str(e)}"
+            db.commit()
+    finally:
+        db.close()
+)
 
     except Exception as e:
         print(f" ❌ Job {record_id} FAILED: {e}")

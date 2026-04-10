@@ -8,47 +8,21 @@ import noisereduce as nr
 import gc
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from huggingface_hub import snapshot_download
-from model import SERModel
+from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 
 class SEREngine:
     def __init__(self):
-        print("SER-Svc: Loading Neural Models during startup...")
-        self.labels = ["neutral","calm","happy","sad","angry","fearful","disgust"]
-        model_dir = snapshot_download("MathRaaj/ser-fast-cnn-bilstm")
-        weights_path = os.path.join(model_dir, "pytorch_model.bin")
+        print("SER-Svc: Loading MathRaaj/ser-optimized during startup...")
+        model_id = "MathRaaj/ser-optimized"
         
-        self.model = SERModel()
-        state_dict = torch.load(weights_path, map_location="cpu")
-        # Remove module. prefix if present from DataParallel
-        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        self.model.load_state_dict(state_dict)
+        # Load Hugging Face components
+        self.extractor = AutoFeatureExtractor.from_pretrained(model_id)
+        self.model = AutoModelForAudioClassification.from_pretrained(model_id)
         self.model.eval()
-        print("SER-Svc: Models Loaded Successfully!")
-
-    def extract_features(self, audio, sr=16000, n_mels=128, n_frames=400):
-        try:
-            mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels)
-            mel_db = librosa.power_to_db(mel, ref=np.max)
-            delta = librosa.feature.delta(mel_db)
-            delta2 = librosa.feature.delta(mel_db, order=2)
-            
-            features = np.stack([mel_db, delta, delta2], axis=0)
-            
-            if features.shape[2] < n_frames:
-                pad = n_frames - features.shape[2]
-                features = np.pad(features, ((0,0), (0,0), (0, pad)))
-            else:
-                features = features[:, :, :n_frames]
-            
-            for c in range(3):
-                feat_mean = features[c].mean()
-                feat_std = features[c].std()
-                features[c] = (features[c] - feat_mean) / (feat_std + 1e-9)
-            
-            return torch.tensor(features).unsqueeze(0).float()
-        except Exception:
-            return None
+        
+        # Labels are automatically loaded from model config
+        self.labels = self.model.config.id2label
+        print(f"SER-Svc: Models Loaded Successfully with labels: {list(self.labels.values())}")
 
     def process(self, audio_url: str):
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,7 +30,6 @@ class SEREngine:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AudioGuard/1.0"}
             resp = requests.get(audio_url, headers=headers, timeout=30)
             if resp.status_code != 200:
-                # Log detailed failure for debugging
                 err_msg = f"Failed to download audio. Status: {resp.status_code}, URL: {audio_url}"
                 print(f"SER-Svc Error: {err_msg}")
                 raise Exception(err_msg)
@@ -64,24 +37,31 @@ class SEREngine:
             with open(path, "wb") as f:
                 f.write(resp.content)
             
+            # Load and preprocess
             y, sr = librosa.load(path, sr=16000)
             y = nr.reduce_noise(y=y, sr=sr)
             
-            features = self.extract_features(y)
-            if features is None:
-                raise ValueError("Feature extraction failed")
+            # Prepare inputs for WavLM
+            inputs = self.extractor(y, sampling_rate=16000, return_tensors="pt", padding=True)
             
             with torch.no_grad():
-                out = self.model(features)
-                logits = out["logits"]
+                # We need output_hidden_states to extract the 768-dim embedding from the base model
+                outputs = self.model(**inputs, output_hidden_states=True)
+                logits = outputs.logits
                 probs = torch.softmax(logits, dim=-1)
+                
+                # Embedding: Take the mean of the hidden states from the last transformer layer
+                # This gives us a robust 768-dim feature vector for context
+                last_hidden_state = outputs.hidden_states[-1]
+                embedding = torch.mean(last_hidden_state, dim=1).squeeze().tolist()
             
             score, idx = torch.max(probs, dim=-1)
             gc.collect()
             
             return {
                 "detected_emotion": self.labels[idx.item()],
-                "ser_confidence": float(score)
+                "ser_confidence": float(score),
+                "embedding": embedding
             }
 
 app = FastAPI(title="AudioGuard SER-Svc")
@@ -102,6 +82,8 @@ def get_emotion(req: EmotionRequest):
             raise Exception("SER Engine not initialized")
         return engine.process(req.audio_url)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
