@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-cache SER model
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('MathRaaj/ser-fast-cnn-bilstm')"
+# Pre-cache SER model and backbone
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('MathRaaj/ser-optimized')"
 
 COPY . .
 
