@@ -28,6 +28,7 @@ echo "🏗️ Building Microservice Containers in the Cloud..."
 gcloud builds submit --tag ${IMAGE_BASE}/whisper-svc ./ml_services/whisper-svc &
 gcloud builds submit --tag ${IMAGE_BASE}/ser-svc ./ml_services/ser-svc &
 gcloud builds submit --tag ${IMAGE_BASE}/tca-svc ./ml_services/tca-svc &
+gcloud builds submit --tag ${IMAGE_BASE}/meta-svc ./ml_services/meta-svc &
 gcloud builds submit --tag ${IMAGE_BASE}/backend ./backend &
 wait
 
@@ -46,6 +47,9 @@ SER_URL=$(gcloud run services describe ser-svc --region ${REGION} --format 'valu
 gcloud run deploy tca-svc --image ${IMAGE_BASE}/tca-svc --region ${REGION} --platform managed --memory 1Gi --cpu 1 --allow-unauthenticated --quiet
 TCA_URL=$(gcloud run services describe tca-svc --region ${REGION} --format 'value(status.url)')
 
+gcloud run deploy meta-svc --image ${IMAGE_BASE}/meta-svc --region ${REGION} --platform managed --memory 1Gi --cpu 1 --allow-unauthenticated --quiet
+META_URL=$(gcloud run services describe meta-svc --region ${REGION} --format 'value(status.url)')
+
 # 6. Deploy Backend Orchestrator (With Linked URLs)
 echo "🔗 Linking Services & Deploying Orchestrator..."
 gcloud run deploy audioguard-backend \
@@ -54,7 +58,7 @@ gcloud run deploy audioguard-backend \
   --platform managed \
   --memory 1Gi \
   --allow-unauthenticated \
-  --set-env-vars "WHISPER_URL=${WHISPER_URL},SER_URL=${SER_URL},TCA_URL=${TCA_URL}" \
+  --set-env-vars "WHISPER_URL=${WHISPER_URL},SER_URL=${SER_URL},TCA_URL=${TCA_URL},META_URL=${META_URL},HATE_THRESHOLD=0.35" \
   --quiet
 
 FINAL_URL=$(gcloud run services describe audioguard-backend --region ${REGION} --format 'value(status.url)')
