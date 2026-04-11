@@ -143,18 +143,6 @@ async def perform_analysis_task(video_url: str, record_id: int):
             db.commit()
     finally:
         db.close()
-)
-
-    except Exception as e:
-        print(f" ❌ Job {record_id} FAILED: {e}")
-        traceback.print_exc()
-        record = db.query(VideoRecord).filter(VideoRecord.id == record_id).first()
-        if record:
-            record.status = "FAILED"
-            record.transcription = f"Analysis Error: {str(e)}"
-            db.commit()
-    finally:
-        db.close()
 
 # --- Routes ---
 @app.get("/")
