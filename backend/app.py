@@ -23,21 +23,25 @@ SER_URL = os.getenv("SER_URL", "http://localhost:8082").rstrip("/")
 TCA_URL = os.getenv("TCA_URL", "http://localhost:8083").rstrip("/")
 META_URL = os.getenv("META_URL", "http://localhost:8084").rstrip("/")
 
-# Initialize DB tables with Auto-Migration for the Dashboard Restoration
-try:
-    # Check if the latest feature columns exist (to detect outdated DB on Railway)
-    with engine.connect() as conn:
-        conn.execute(text("SELECT tca_confidence FROM video_records LIMIT 1"))
-    print("Database schema is up-to-date.")
-except Exception:
-    print("Outdated Database detected. Forcing schema update for Dashboard Restoration...")
+# Initialize DB tables with Resilience for Cloud Deployment
+def sync_db():
+    print("Orchestrator: Syncing Database Schema...")
     try:
-        # If it fails, we drop and recreate to ensure all columns (tca_confidence, etc) are added.
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        print("Database schema successfully synchronized.")
-    except Exception as e:
-        print(f"Database Sync Warning: {e}")
+        # Check if the latest feature columns exist
+        with engine.connect() as conn:
+            conn.execute(text("SELECT tca_confidence FROM video_records LIMIT 1"))
+        print("✅ Database schema is up-to-date.")
+    except Exception:
+        print("⚠️ Outdated or Missing Database. Attempting safe synchronization...")
+        try:
+            # We use a try-except here to avoid crashing the whole startup if DB is locked/unreachable
+            Base.metadata.create_all(bind=engine)
+            print("✅ Database schema synchronized successfully.")
+        except Exception as e:
+            print(f"❌ Database Synchronization Failed: {e}")
+
+# Call sync_db before starting the app logic
+sync_db()
 
 app = FastAPI(title="AudioGuard Orchestrator API")
 
